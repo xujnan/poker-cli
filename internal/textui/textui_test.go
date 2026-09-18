@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/creack/pty"
+
 	"github.com/xujnan/poker-cli/internal/poker"
 )
 
@@ -85,6 +87,27 @@ func TestWidthCountsColumnsNotBytes(t *testing.T) {
 		"A♠ K♥": 5,
 		"":      0,
 		"玩家abc": 7,
+	}
+	for in, want := range cases {
+		if got := Width(in); got != want {
+			t.Fatalf("%q 该占 %d 列，得到 %d", in, want, got)
+		}
+	}
+}
+
+// TestWidthHandlesNamesNobodyPlannedFor：名字是 `--as` 传进来的任意字符串。
+//
+// 下面这四类以前全算错，每一类都让座位表歪一格：自己手写的那张范围表
+// 把组合符号当成各占一列，把 ZWJ 拼出来的 emoji 当成好几个字符，
+// 还漏掉了扑克牌 emoji 所在的 U+1F0A0 那一块——一个扑克程序漏了它。
+func TestWidthHandlesNamesNobodyPlannedFor(t *testing.T) {
+	cases := map[string]int{
+		"café":                4, // e + 组合尖音符，组合符号不占列
+		"ที่":                  1, // 泰文：一个辅音带两个组合符
+		"🃏":                    2, // U+1F0CF 扑克牌 emoji
+		"👩‍💻":                  2, // ZWJ 序列是一个字素簇
+		"김선수":                  6, // 韩文音节
+		"\U0001F1E8\U0001F1F3": 2, // 区域指示符拼出来的国旗
 	}
 	for in, want := range cases {
 		if got := Width(in); got != want {
@@ -198,19 +221,76 @@ func TestUseColorStaysOffForPipes(t *testing.T) {
 	}
 }
 
-// TestNoColorEnvIsHonored：NO_COLOR 说了不算数就是不算数（https://no-color.org）。
-func TestNoColorEnvIsHonored(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-	t.Cleanup(func() { colorOn.Store(false) })
-	// 拿一个字符设备来试，没有 NO_COLOR 的话它是会上色的。
-	dev, err := os.Open(os.DevNull)
+// TestCharDeviceIsNotATerminal：字符设备不等于终端。
+//
+// 这条是一个真出过的 bug 的墓碑。以前的判断是 os.ModeCharDevice，而
+// /dev/null、/dev/zero、串口全都是字符设备——于是 `poker join ... > /dev/null`
+// 会被当成终端，往里灌光标移动序列。x/term 走真正的 TCGETS ioctl，只有终端答得上来。
+func TestCharDeviceIsNotATerminal(t *testing.T) {
+	dev, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
 		t.Skip("打不开 /dev/null")
 	}
 	defer dev.Close()
-	UseColor(dev)
+	if info, err := dev.Stat(); err == nil && info.Mode()&os.ModeCharDevice == 0 {
+		t.Skip("这台机器上 /dev/null 不是字符设备，这条就没什么可测的了")
+	}
+	if IsTerminal(dev) {
+		t.Fatal("/dev/null 被当成终端了")
+	}
+}
+
+// TestRealTerminalGetsColorAndSize：对着真 pty 该上色，也该问得出尺寸。
+//
+// 前面几条都只能证明「不是终端时不做什么」。要证明「是终端时确实做」，
+// 就得有一个真的终端——所以这里开一个 pty。
+func TestRealTerminalGetsColorAndSize(t *testing.T) {
+	t.Cleanup(func() { colorOn.Store(false) })
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Skipf("开不了 pty: %v", err)
+	}
+	defer ptmx.Close()
+	defer tty.Close()
+
+	if !IsTerminal(tty) {
+		t.Fatal("真 pty 都不算终端，那就没有什么算了")
+	}
+	if err := pty.Setsize(tty, &pty.Winsize{Rows: 24, Cols: 80}); err != nil {
+		t.Fatalf("设不了窗口大小: %v", err)
+	}
+	if got := Height(tty); got != 24 {
+		t.Fatalf("终端该有 24 行，得到 %d", got)
+	}
+
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm")
+	UseColor(tty)
+	if !colorOn.Load() {
+		t.Fatal("对着真终端该上色")
+	}
+
+	// NO_COLOR 说了不算数就是不算数（https://no-color.org）——哪怕对面真是终端。
+	colorOn.Store(false)
+	t.Setenv("NO_COLOR", "1")
+	UseColor(tty)
 	if colorOn.Load() {
 		t.Fatal("设了 NO_COLOR 还上色")
+	}
+}
+
+// TestHeightIsZeroWhenThereIsNoTerminal：问不出来就说问不出来，别瞎猜一个数。
+func TestHeightIsZeroWhenThereIsNoTerminal(t *testing.T) {
+	if got := Height(&strings.Builder{}); got != 0 {
+		t.Fatalf("不是文件，该返回 0，得到 %d", got)
+	}
+	f, err := os.CreateTemp(t.TempDir(), "out")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if got := Height(f); got != 0 {
+		t.Fatalf("普通文件没有行数，该返回 0，得到 %d", got)
 	}
 }
 

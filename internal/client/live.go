@@ -9,11 +9,21 @@ import (
 	"github.com/xujnan/poker-cli/internal/textui"
 )
 
-// maxLogLines 是牌局流水最多显示几行。
-//
-// 得有个上限：一帧要能塞进一屏，否则光标上移的行数会算错——终端滚过之后，
-// 「上移 N 行」回到的就不是原来那个位置了。二十来行的一帧在标准终端里是安全的。
-const maxLogLines = 8
+const (
+	// logCap 是牌局流水最多攒几条。屏幕上显示几条由终端多高决定（见 frame），
+	// 这个数只是不让一手长牌把内存越攒越多。
+	logCap = 64
+	// fallbackLogLines 是问不出终端高度时显示几条流水。
+	//
+	// 问不出来只发生在对面不是终端的时候——那种情况下重画本来就该退回滚动输出，
+	// 走不到这里。留一个保守的数，是为了万一走到了也不会画出一屏塞不下的东西。
+	fallbackLogLines = 8
+	// minLogLines 是再挤也要留几条流水。
+	//
+	// 终端矮到连这几条都放不下时，宁可让它滚一下，也不能把「刚才发生了什么」删干净——
+	// 那时屏幕上只剩一个静止的局面，人根本不知道牌是怎么走到这儿的。
+	minLogLines = 2
+)
 
 // liveView 把「这一手正在发生什么」画成固定的一屏，就地重画，而不是往下滚（ADR-0017）。
 //
@@ -175,8 +185,8 @@ func (v *liveView) patchSeat(ev poker.Event) {
 
 func (v *liveView) addLog(format string, args ...any) {
 	v.log = append(v.log, fmt.Sprintf(format, args...))
-	if len(v.log) > maxLogLines {
-		v.log = v.log[len(v.log)-maxLogLines:]
+	if len(v.log) > logCap {
+		v.log = v.log[len(v.log)-logCap:]
 	}
 }
 
@@ -203,7 +213,47 @@ func (v *liveView) render() {
 }
 
 // frame 画出当前这一帧。最后一行是输入提示，不换行——光标就停在它后面。
+//
+// 一帧必须塞得进一屏：塞不进时终端会滚动，而滚动之后「上移 N 行」回到的就不是
+// 原来那个位置，屏幕会一路烂下去。以前靠一个拍脑袋的常数压着，现在直接问终端多高，
+// 把除流水之外的部分先排好，剩下几行就显示几条流水。
 func (v *liveView) frame() string {
+	head, fixed := v.headAndSeats(), v.tail()
+	budget := v.logBudget(strings.Count(head, "\n") + strings.Count(fixed, "\n"))
+
+	log := v.log
+	if len(log) > budget {
+		log = log[len(log)-budget:]
+	}
+	var b strings.Builder
+	b.WriteString(head)
+	for _, l := range log {
+		fmt.Fprintf(&b, "  %s\n", l)
+	}
+	b.WriteString(fixed)
+	return b.String()
+}
+
+// logBudget 算出这一帧还能放几条流水。fixed 是除流水外已经占掉的行数。
+func (v *liveView) logBudget(fixed int) int {
+	h := textui.Height(v.out)
+	if h <= 0 {
+		// 问不出高度说明对面不是终端，重画本来就不该走到这里。
+		return fallbackLogLines
+	}
+	// fixed 数的是换行符，而最后一个换行符之后光标还停在一行上——那一行也得占个位置。
+	// 断开时再多留一行：那一帧末尾还会多打一个换行，把光标挪出这一屏。
+	reserve := 1
+	if v.gone {
+		reserve = 2
+	}
+	if n := h - fixed - reserve; n > minLogLines {
+		return n
+	}
+	return minLogLines
+}
+
+func (v *liveView) headAndSeats() string {
 	var b strings.Builder
 
 	head := "等人来凑一桌…"
@@ -244,9 +294,12 @@ func (v *liveView) frame() string {
 	if len(v.board) > 0 || v.pot > 0 {
 		fmt.Fprintf(&b, "公共牌 %s    底池 %d\n", textui.Cards(v.board), v.pot)
 	}
-	for _, l := range v.log {
-		fmt.Fprintf(&b, "  %s\n", l)
-	}
+	return b.String()
+}
+
+// tail 是流水底下那几行：提醒、轮次、输入提示。
+func (v *liveView) tail() string {
+	var b strings.Builder
 	if v.note != "" {
 		fmt.Fprintf(&b, "%s\n", v.note)
 	}

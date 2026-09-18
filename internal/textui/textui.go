@@ -15,7 +15,9 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
-	"unicode/utf8"
+
+	"github.com/mattn/go-runewidth"
+	"golang.org/x/term"
 
 	"github.com/xujnan/poker-cli/internal/poker"
 )
@@ -42,16 +44,35 @@ var colorOn atomic.Bool
 //
 // 凡是「只有终端才做得了」的事都该先问它一句：上色、就地重画光标。管道、重定向、
 // 测试里的 buffer 一律返回 false——往那些地方写转义序列，出来的就是一堆乱码。
+//
+// 这里用 x/term 而不是自己看 os.ModeCharDevice，因为后者根本不是在问「是不是终端」，
+// 它问的是「是不是字符设备」，而 /dev/null、/dev/zero、串口全都是字符设备。
+// 于是 `poker join ... > /dev/null` 会被判成终端，往里灌一堆光标移动序列。
+// x/term 走的是真正的 TCGETS ioctl——只有终端答得上来。
 func IsTerminal(w io.Writer) bool {
 	f, ok := w.(*os.File)
 	if !ok {
 		return false
 	}
-	info, err := f.Stat()
-	if err != nil {
-		return false
+	return term.IsTerminal(int(f.Fd()))
+}
+
+// Height 返回 w 那一头的终端有多少行，问不出来就返回 0。
+//
+// 就地重画的那一屏必须塞得进一屏：塞不进时终端会滚动，而滚动之后「上移 N 行」
+// 回到的就不是原来那个位置了。以前这个上限是一个拍脑袋的常数，现在直接问终端。
+// 每次重画都问一遍（一次 ioctl，微秒级），顺带把「用户中途拉大拉小窗口」也管了，
+// 不必再去接 SIGWINCH。
+func Height(w io.Writer) int {
+	f, ok := w.(*os.File)
+	if !ok {
+		return 0
 	}
-	return info.Mode()&os.ModeCharDevice != 0
+	_, h, err := term.GetSize(int(f.Fd()))
+	if err != nil {
+		return 0
+	}
+	return h
 }
 
 // UseColor 在 w 确实是终端时打开彩色。只在进程启动时调一次。
@@ -89,28 +110,36 @@ func Cards(cs []poker.Card) string {
 	return strings.Join(parts, " ")
 }
 
-// Width 估算一个字符串在等宽终端里占几列。
+// Width 算一个字符串在等宽终端里占几列。
 //
-// 只分两档：东亚宽字符占两列，其余一列。真正严谨的宽度表在 golang.org/x/text/width，
-// 但那要引一个依赖，而这里要摆平的只有中文名字、中文表头和几个花色符号。
+// 宽度表交给 go-runewidth。自己手写的那张范围表撑不住名字是任意用户输入这件事：
+// 它把组合符号（法语的重音、泰文的声调）当成各占一列、把 ZWJ 拼出来的 emoji
+// 当成好几个字符，还漏掉了 U+1F0A0 那一块——扑克牌 emoji 🃏，一个扑克程序漏了它。
+// 每一处都让座位表歪一格，而歪掉的那一格不会有编译错误。
 //
-// 花色符号（U+2660 一族）属于 Unicode 里的「宽度不定」区，多数终端按一列排，
-// 所以这里也按一列算——这正是不用 emoji 形态的原因。
+// 花色符号（U+2660 一族）属于 Unicode 里的「宽度不定」区，runewidth 默认按一列排，
+// 和多数终端一致——这正是不用 emoji 形态（♠️）的原因，那个是双宽而且各家不一致。
 func Width(s string) int {
 	w := 0
 	for i := 0; i < len(s); {
 		// 跳过 ANSI 转义序列：它一列都不占，算进去的话上了色的那行就会短一截。
+		// 这一层得自己来，runewidth 只认字符，不认转义序列。
 		if n := escapeLen(s[i:]); n > 0 {
 			i += n
 			continue
 		}
-		r, size := utf8.DecodeRuneInString(s[i:])
-		if isWide(r) {
-			w += 2
-		} else {
-			w++
+		// 一次量一整段普通文本，而不是一个 rune 一个 rune 地量：ZWJ 序列和组合符号
+		// 都是一串 rune 占一个格子，拆开逐个问会把它们数成好几格。
+		//
+		// 从第 1 个字节之后找下一个转义序列，是为了保证这一段至少有一个字节，
+		// 循环一定往前走——上面那个 escapeLen 遇到残缺的转义序列会返回 0。
+		rest := s[i:]
+		end := len(rest)
+		if j := strings.Index(rest[1:], "\033["); j >= 0 {
+			end = j + 1
 		}
-		i += size
+		w += runewidth.StringWidth(rest[:end])
+		i += end
 	}
 	return w
 }
@@ -126,28 +155,6 @@ func escapeLen(s string) int {
 		}
 	}
 	return 0
-}
-
-func isWide(r rune) bool {
-	switch {
-	case r >= 0x1100 && r <= 0x115F: // 谚文字母
-		return true
-	case r >= 0x2E80 && r <= 0xA4CF: // 中日韩部首 ~ 彝文，含中文标点「、」「。」
-		return r != 0x303F
-	case r >= 0xAC00 && r <= 0xD7A3: // 谚文音节
-		return true
-	case r >= 0xF900 && r <= 0xFAFF: // 中日韩兼容表意
-		return true
-	case r >= 0xFE30 && r <= 0xFE6F: // 中日韩兼容形式
-		return true
-	case r >= 0xFF00 && r <= 0xFF60: // 全角，含「（」「：」
-		return true
-	case r >= 0xFFE0 && r <= 0xFFE6:
-		return true
-	case r >= 0x1F300 && r <= 0x1FAFF: // emoji
-		return true
-	}
-	return false
 }
 
 // Pad 把字符串右边补到 n 列宽。

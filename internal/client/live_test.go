@@ -2,8 +2,11 @@ package client
 
 import (
 	"fmt"
+	"io"
 	"strings"
 	"testing"
+
+	"github.com/creack/pty"
 
 	"github.com/xujnan/poker-cli/internal/poker"
 )
@@ -210,21 +213,86 @@ func TestLiveNoticeLastsUntilTheNextEvent(t *testing.T) {
 	}
 }
 
-// TestLiveLogIsBounded：流水有上限，一帧才塞得进一屏。
-//
-// 塞不进的话终端会滚动，而滚动之后「上移 N 行」回到的就不是原来那个位置了，
-// 屏幕会直接烂掉。
-func TestLiveLogIsBounded(t *testing.T) {
+// TestLiveLogIsCappedInMemory：攒着的流水有个上限，一手长牌不会越攒越多。
+func TestLiveLogIsCappedInMemory(t *testing.T) {
 	v := newLiveView(&strings.Builder{}, "我")
 	feed(v, poker.Event{Type: poker.EventHandStart, Hand: 1})
-	for i := 0; i < maxLogLines*3; i++ {
+	for i := 0; i < logCap*3; i++ {
 		v.addLog("第 %d 条", i)
 	}
-	if len(v.log) != maxLogLines {
-		t.Fatalf("流水该被截到 %d 条，得到 %d 条", maxLogLines, len(v.log))
+	if len(v.log) != logCap {
+		t.Fatalf("流水该被截到 %d 条，得到 %d 条", logCap, len(v.log))
 	}
-	// 留下的必须是最近的那几条。
-	if !strings.Contains(v.frame(), fmt.Sprintf("第 %d 条", maxLogLines*3-1)) {
-		t.Fatal("最新的一条被截掉了")
+}
+
+// TestLiveFrameFitsTheTerminal：一帧必须塞得进一屏，屏幕多高就画多高。
+//
+// 塞不进时终端会滚动，而滚动之后「上移 N 行」回到的就不是原来那个位置，
+// 屏幕会一路烂下去。这一条得对着真 pty 跑：高度是问出来的，不是常数。
+func TestLiveFrameFitsTheTerminal(t *testing.T) {
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Skipf("开不了 pty: %v", err)
+	}
+	defer ptmx.Close()
+	defer tty.Close()
+	// pty 里没人读的话写会堵住，开一个只管丢的读者。
+	go io.Copy(io.Discard, ptmx)
+
+	v := newLiveView(tty, "我")
+	feed(v, handOne()...)
+	for i := 0; i < 60; i++ {
+		v.addLog("第 %d 条流水", i)
+	}
+
+	for _, rows := range []int{40, 24, 12, 8} {
+		if err := pty.Setsize(tty, &pty.Winsize{Rows: uint16(rows), Cols: 100}); err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Count(v.frame(), "\n") + 1 // 最后一行提示符没有换行
+		if lines > rows {
+			t.Fatalf("终端 %d 行，画了 %d 行：\n%s", rows, lines, v.frame())
+		}
+		// 最新的那条流水永远得在——截的是旧的那头。
+		if !strings.Contains(v.frame(), "第 59 条流水") {
+			t.Fatalf("终端 %d 行时把最新的一条截掉了：\n%s", rows, v.frame())
+		}
+	}
+}
+
+// TestLiveKeepsSomeLogEvenOnATinyTerminal：终端矮到离谱时，宁可让它滚一下，
+// 也不能把「刚才发生了什么」删干净——那时屏幕上只剩一个静止的局面。
+func TestLiveKeepsSomeLogEvenOnATinyTerminal(t *testing.T) {
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Skipf("开不了 pty: %v", err)
+	}
+	defer ptmx.Close()
+	defer tty.Close()
+	go io.Copy(io.Discard, ptmx)
+
+	if err := pty.Setsize(tty, &pty.Winsize{Rows: 3, Cols: 100}); err != nil {
+		t.Fatal(err)
+	}
+	v := newLiveView(tty, "我")
+	feed(v, handOne()...)
+	if got := strings.Count(v.frame(), "条流水"); got != 0 {
+		t.Fatalf("这一手还没有流水才对")
+	}
+	v.addLog("最后一条")
+	if !strings.Contains(v.frame(), "最后一条") {
+		t.Fatalf("三行高的终端也得留下点流水：\n%s", v.frame())
+	}
+}
+
+// TestLiveFallsBackWhenHeightIsUnknown：问不出高度（对面不是终端）时用保守的默认值。
+func TestLiveFallsBackWhenHeightIsUnknown(t *testing.T) {
+	v := newLiveView(&strings.Builder{}, "我")
+	feed(v, poker.Event{Type: poker.EventHandStart, Hand: 1})
+	for i := 0; i < 30; i++ {
+		v.addLog("第 %d 条", i)
+	}
+	if got := strings.Count(v.frame(), " 条"); got != fallbackLogLines {
+		t.Fatalf("该退回 %d 条，画了 %d 条", fallbackLogLines, got)
 	}
 }
