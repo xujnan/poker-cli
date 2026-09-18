@@ -6,10 +6,12 @@ type EventType string
 const (
 	// EventTable 是牌桌快照，在有人加入时发给他本人，让他不必从零重放事件。
 	EventTable EventType = "table"
-	// EventJoined / EventLeft / EventSitOut 是座位变动，公开信息。
+	// 座位变动都是公开信息：谁来了、谁走了、谁暂离、谁回来了、谁补了码。
 	EventJoined EventType = "joined"
 	EventLeft   EventType = "left"
 	EventSitOut EventType = "sit_out"
+	EventSitIn  EventType = "sit_in"
+	EventTopUp  EventType = "top_up"
 
 	EventHandStart      EventType = "hand_start"
 	EventBlind          EventType = "blind"

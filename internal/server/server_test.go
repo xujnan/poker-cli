@@ -459,11 +459,11 @@ func TestSittingOutPlayerSeesOnlyPublicInfo(t *testing.T) {
 	// 三个带够筹码的人，是为了 carol 输光之后牌桌还开得下去——
 	// 只有两个人的话，随便谁先破产都会让牌局停下，这条测试就会等在一个正确的状态上。
 	alice := dial(t, s, "alice")
-	autoPlay(t, alice, 40)
+	keepPlaying(t, alice)
 	bob := dial(t, s, "bob")
-	autoPlay(t, bob, 40)
+	keepPlaying(t, bob)
 	dave := dial(t, s, "dave")
-	autoPlay(t, dave, 40)
+	keepPlaying(t, dave)
 
 	carol, err := client.Dial(s.SocketDir(), s.Code(), "carol", 2)
 	if err != nil {

@@ -22,6 +22,13 @@ func Render(ev poker.Event) string {
 		return fmt.Sprintf("* %s 离开了牌桌", ev.Player)
 	case poker.EventSitOut:
 		return fmt.Sprintf("* %s 暂离（%s），座位和筹码留着", ev.Player, ev.Message)
+	case poker.EventSitIn:
+		return fmt.Sprintf("* %s 回座了", ev.Player)
+	case poker.EventTopUp:
+		if ev.Stack == nil {
+			return fmt.Sprintf("* %s 补码 %d（%s）", ev.Player, ev.Amount, ev.Message)
+		}
+		return fmt.Sprintf("* %s 补码 %d，现在有 %d", ev.Player, ev.Amount, *ev.Stack)
 
 	case poker.EventHandStart:
 		return fmt.Sprintf("\n── 第 %d 手 ──  庄家 %s，盲注 %s\n   %s",

@@ -20,9 +20,21 @@ go build -o poker ./cmd/poker
 ```
 
 凑够两个有筹码的人就自动开牌，此后每 `--hand-delay` 开下一手，不需要任何人确认（ADR-0014）。
-轮到你的时候直接敲 `call`、`check`、`fold`、`allin` 或 `bet 100`。
+轮到你的时候直接敲 `call`、`check`、`fold`、`allin` 或 `bet 100`；
+想歇会儿就 `sitout`（这手打完生效，座位和筹码都留着），回来敲 `sitin`，输光了先 `topup 200`。
 
 `bet` 永远是「把本轮总投入推到这个数」，不是「再加这么多」（ADR-0005）。没有 `raise`，也没有单字母别名。
+
+### 让它自己一直打下去
+
+```sh
+./poker serve --blinds 1/2 --hand-delay 0 --timeout 1s
+./poker bot ABC234 --as bot1 --rebuy
+./poker bot ABC234 --as bot2 --rebuy
+```
+
+`--rebuy` 让机器人输光之后自动补回最初的带入。不加的话，破产的人会自动 Sitting Out，
+桌上剩不到两个有筹码的人，牌局就永远停在那儿了——无人值守的自对弈迟早撞上这一幕。
 
 ## 给 agent 用
 
@@ -56,10 +68,11 @@ go build -o poker ./cmd/poker
 - 四条 Street 的完整下注轮，大盲在 preflop 的 option
 - bet / call / check / fold / allin，最小加注额、不足额 all-in 不重开下注轮
 - 主池与边池按投入额分层，未被匹配的注额原样退还，平分除不尽时按位置发
-- Stack、Buy-in，输光自动进入 Sitting Out
+- Stack、Buy-in、Top-up（补码），输光自动进入 Sitting Out，补了码就回来
+- 手动 `sitout` / `sitin`；`--rebuy` 让无人值守的牌桌一直打下去
 - 断线接管与行动超时：没人能靠装死或拔网线冻住整张牌桌
 
-还没有的：Top-up（补码）、手动 `sitout` / `sitin`、Hand History 落盘、跨机联机。
+还没有的：Hand History 落盘、跨机联机。
 
 ## 目录
 
@@ -89,6 +102,11 @@ go test -race ./...
   不足额 all-in 不重开下注轮），外加一条随机对局的**筹码守恒**测试：让随机 agent 从合法动作列表里
   瞎选，跑几百手牌，桌上的筹码总额一分都不能变。钱算错了不会崩，只会悄悄少给某人几块。
 - `internal/poker/pot_test.go` —— 边池分层与判定，每个池单独判赢家。
+- `internal/client/decide_test.go` —— 机器人是 agent 接口的常驻回归测试（ADR-0010），所以它自己也得被测。
+  里面钉着一条真出过的 bug：两个「强牌就加注到最小加注额」的机器人会互相对加到有人推光，
+  规则上完全合法，但一手牌要走上百个动作。
+- `internal/server/topup_test.go` —— 补码只在两手牌之间落地（这条能直接从事件流上看出来：
+  一条到账的 `top_up` 绝不该夹在 `hand_start` 和 `hand_end` 中间），以及破产→补码→牌桌接着跑。
 - `internal/poker/visibility_test.go` 与 `internal/server/server_test.go` —— ADR-0006 的可见性不变量，
   分别在事件层面和真实 socket 投递路径上各守一道，含「弃牌者底牌永不公开」和
   「Sitting Out 的人看到的信息严格等于弃牌后旁观的在座玩家」。

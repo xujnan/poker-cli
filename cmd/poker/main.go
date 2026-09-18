@@ -19,7 +19,7 @@ import (
 const usage = `用法：
   poker serve [--blinds 1/2] [--seed N] [--hand-delay 3s] [--timeout 30s]  开一张牌桌，打印 Table Code
   poker join <CODE> --as <名字> [--buyin N] [--format ...]  以人的身份坐下
-  poker bot  <CODE> --as <名字> [--buyin N]                 以机器人的身份坐下（独立进程，走与 agent 相同的接口）
+  poker bot  <CODE> --as <名字> [--buyin N] [--rebuy]       以机器人的身份坐下（独立进程，走与 agent 相同的接口）
 
 各子命令的 --help 里有完整参数。
 `
@@ -112,6 +112,7 @@ func runJoin(args []string) error {
 	fs := flag.NewFlagSet("join", flag.ExitOnError)
 	name := fs.String("as", "", "你在牌桌上的名字（必填）")
 	buyin := fs.Int("buyin", 0, "带入多少筹码，留空则用牌桌的默认值")
+	rebuy := fs.Bool("rebuy", false, "输光之后自动补码回最初的带入")
 	format := fs.String("format", client.FormatText, "输出格式：text 给人看，jsonl 给 agent 看")
 	dir := fs.String("dir", "", "socket 所在目录，留空取 ~/.poker")
 	code, err := parseCodeAndFlags(fs, args, "join")
@@ -130,13 +131,14 @@ func runJoin(args []string) error {
 		return err
 	}
 	defer s.Close()
-	return client.Play(s, *format, os.Stdout, os.Stdin)
+	return client.Play(s, *format, os.Stdout, os.Stdin, *rebuy)
 }
 
 func runBot(args []string) error {
 	fs := flag.NewFlagSet("bot", flag.ExitOnError)
 	name := fs.String("as", "", "机器人在牌桌上的名字（必填）")
 	buyin := fs.Int("buyin", 0, "带入多少筹码，留空则用牌桌的默认值")
+	rebuy := fs.Bool("rebuy", false, "输光之后自动补码回最初的带入，牌桌就能一直打下去")
 	dir := fs.String("dir", "", "socket 所在目录，留空取 ~/.poker")
 	code, err := parseCodeAndFlags(fs, args, "bot")
 	if err != nil {
@@ -152,7 +154,7 @@ func runBot(args []string) error {
 	}
 	defer s.Close()
 	// 机器人把看到的事件打到 stderr，stdout 留给将来可能的结构化输出。
-	return client.RunBot(s, os.Stderr)
+	return client.RunBot(s, os.Stderr, *rebuy)
 }
 
 // parseCodeAndFlags 从 `poker join ABC123 --as alice` 这种形式里取出 Table Code。

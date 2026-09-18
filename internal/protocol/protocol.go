@@ -30,6 +30,12 @@ const (
 	// CmdBet 的 Amount 是「把本轮总投入推到多少」，不是「再加多少」（ADR-0005）。
 	CmdBet   CommandType = "bet"
 	CmdAllIn CommandType = "allin"
+
+	// CmdTopUp 补码。随时能发，但只在两手牌之间落地（ADR-0015）。
+	CmdTopUp CommandType = "topup"
+	// CmdSitOut / CmdSitIn 是「我歇会儿」和「我回来了」（ADR-0014）。
+	CmdSitOut CommandType = "sitout"
+	CmdSitIn  CommandType = "sitin"
 )
 
 // Command 是客户端发往服务端的一条命令。
@@ -38,7 +44,7 @@ type Command struct {
 	// Name 和 Buyin 只在 join 时用。
 	Name  string `json:"name,omitempty"`
 	Buyin int    `json:"buyin,omitempty"`
-	// Amount 只在 bet 时用。
+	// Amount 用于 bet（推到多少）和 topup（补多少）。
 	Amount int `json:"amount,omitempty"`
 }
 
@@ -46,6 +52,15 @@ type Command struct {
 func (c Command) IsAction() bool {
 	switch c.Type {
 	case CmdFold, CmdCheck, CmdCall, CmdBet, CmdAllIn:
+		return true
+	}
+	return false
+}
+
+// IsSeatCommand 判断这条命令是不是座位类命令：它们不推进牌局，只改座位状态。
+func (c Command) IsSeatCommand() bool {
+	switch c.Type {
+	case CmdTopUp, CmdSitOut, CmdSitIn:
 		return true
 	}
 	return false

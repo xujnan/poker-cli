@@ -49,11 +49,20 @@ type seat struct {
 	name  string
 	stack int
 	// c 为 nil 表示这个人掉线了。座位和筹码都留着，用同一个名字再 join 就认回来（ADR-0009）。
-	c          *conn
-	sittingOut bool
+	c *conn
+	// requestedOut 是他自己按的 sitout。它跟「输光了」「人不在」是三件不同的事，
+	// 混成一个布尔的话，重连或补码之后就说不清他到底该不该回到牌桌上。
+	requestedOut bool
+	// pendingTopUp 是收下了但还没落地的补码，等两手牌之间才加到 Stack 上（ADR-0015）。
+	pendingTopUp int
 }
 
 func (st *seat) online() bool { return st.c != nil }
+
+// sittingOut 是此刻不参与手牌。三种来路：他自己要求的、筹码输光了、人不在。
+func (st *seat) sittingOut() bool {
+	return st.requestedOut || st.stack == 0 || !st.online()
+}
 
 // Server 是一张牌桌。
 type Server struct {
@@ -261,6 +270,8 @@ type requestKind int
 const (
 	reqJoin requestKind = iota
 	reqAction
+	// reqSeat 是不参与牌局推进的座位类命令：补码、暂离、回座。
+	reqSeat
 	reqDisconnect
 )
 
@@ -346,6 +357,8 @@ func (s *Server) tableLoop() {
 				s.handleJoin(r.c, r.cmd)
 			case reqAction:
 				s.handleAction(r.c, r.cmd)
+			case reqSeat:
+				s.handleSeatCommand(r.c, r.cmd)
 			case reqDisconnect:
 				s.handleDisconnect(r.c)
 			}
@@ -404,7 +417,6 @@ func (s *Server) handleJoin(c *conn, cmd protocol.Command) {
 		// 同一个名字回来了，认回原座位与筹码（ADR-0009）。重连不发凭据，名字就是身份。
 		c.name = name
 		st.c = c
-		st.sittingOut = st.stack == 0
 		s.log.Printf("%s 重新连上，筹码 %d", name, st.stack)
 		s.sendTable(c, name)
 		s.deliver([]poker.Event{{
@@ -477,7 +489,6 @@ func (s *Server) handleDisconnect(c *conn) {
 	}
 
 	st.c = nil
-	st.sittingOut = true
 	s.log.Printf("%s 断线，筹码 %d 留在座位上", st.name, st.stack)
 	// 断线视同 Sitting Out，筹码不没收（ADR-0009）。
 	s.deliver([]poker.Event{{
@@ -543,16 +554,131 @@ func (s *Server) settleHand() {
 	s.log.Printf("第 %d 手结束，底池 %d，赢家 %s", res.Number, res.Pot, strings.Join(res.Winners, "、"))
 
 	// Stack 归零的人自动进入 Sitting Out——这是 Sitting Out 定义里就写着的一条。
-	// 他还留在座位上，也还收得到牌桌上的公开信息，只是不再被发牌。
-	// 要想再打，得等补码那一刀（Top-up 只能发生在两手牌之间）。
-	for _, st := range s.seats {
-		if st.stack == 0 && !st.sittingOut {
-			st.sittingOut = true
+	// 他还留在座位上，也还收得到牌桌上的公开信息，只是不再被发牌，补了码就能回来。
+	for name, stack := range res.Stacks {
+		if stack != 0 {
+			continue
+		}
+		if st := s.seatOf(name); st != nil {
 			s.deliver([]poker.Event{{
 				Type: poker.EventSitOut, Player: st.name, Message: "筹码输光了", Seats: s.seatViews(),
 			}})
 		}
 	}
+
+	// 这里正是「两手牌之间」，攒着的补码在此刻落地（ADR-0015）。
+	s.applyPendingTopUps()
+}
+
+// --- 座位类命令 ---
+
+func (s *Server) handleSeatCommand(c *conn, cmd protocol.Command) {
+	if c.name == "" {
+		c.send(poker.Event{Type: poker.EventError, Code: "not_joined", Message: "先 join 再说别的"})
+		return
+	}
+	st := s.seatOf(c.name)
+	if st == nil {
+		c.send(poker.Event{Type: poker.EventError, Code: "not_joined", Message: "你不在这张牌桌上"})
+		return
+	}
+	switch cmd.Type {
+	case protocol.CmdTopUp:
+		s.handleTopUp(st, cmd.Amount)
+	case protocol.CmdSitOut:
+		s.handleSitOut(st)
+	case protocol.CmdSitIn:
+		s.handleSitIn(st)
+	}
+}
+
+func (s *Server) handleTopUp(st *seat, amount int) {
+	if amount <= 0 {
+		st.c.send(poker.Event{Type: poker.EventError, Code: "bad_amount", Message: "补码要带一个正数额"})
+		return
+	}
+	// 上限是牌桌的带入线：没有上限的话，谁都能在任意时刻把自己变成桌上最深的筹码（ADR-0015）。
+	room := s.buyin - (st.stack + st.pendingTopUp)
+	if room <= 0 {
+		st.c.send(poker.Event{
+			Type: poker.EventError, Code: "stack_at_max",
+			Message: fmt.Sprintf("你已经有 %d 了，这张桌的带入线是 %d", st.stack+st.pendingTopUp, s.buyin),
+			Max:     s.buyin,
+		})
+		return
+	}
+	if amount > room {
+		st.c.send(poker.Event{
+			Type: poker.EventError, Code: "topup_too_big",
+			Message: fmt.Sprintf("最多还能补 %d（带入线 %d）", room, s.buyin),
+			Max:     room,
+		})
+		return
+	}
+
+	st.pendingTopUp += amount
+	if s.hand == nil {
+		// 现在就是两手牌之间，不用等。
+		s.applyPendingTopUps()
+		return
+	}
+	st.c.send(poker.Event{
+		Type: poker.EventTopUp, To: st.name, Player: st.name, Amount: amount,
+		Message: "这手牌打完就到账",
+	})
+}
+
+// applyPendingTopUps 把攒着的补码加到筹码上。只能在两手牌之间调用。
+func (s *Server) applyPendingTopUps() {
+	for _, st := range s.seats {
+		if st.pendingTopUp <= 0 {
+			continue
+		}
+		add := min(st.pendingTopUp, s.buyin-st.stack)
+		st.pendingTopUp = 0
+		if add <= 0 {
+			continue
+		}
+		st.stack += add
+		s.log.Printf("%s 补码 %d，现在有 %d", st.name, add, st.stack)
+		// 拷一份再取地址：事件是排队等着序列化的，直接指向座位字段的话，
+		// 等它真正被写出去时那个数可能已经变了。
+		stack := st.stack
+		s.deliver([]poker.Event{{
+			Type: poker.EventTopUp, Player: st.name, Amount: add, Stack: &stack, Seats: s.seatViews(),
+		}})
+	}
+}
+
+func (s *Server) handleSitOut(st *seat) {
+	if st.requestedOut {
+		st.c.send(poker.Event{Type: poker.EventError, Code: "already_sitting_out", Message: "你已经在暂离了"})
+		return
+	}
+	st.requestedOut = true
+	// 正在进行的这手牌照打完，暂离从下一手开始生效——牌都发了才说不玩，
+	// 那是把已经投进池子的筹码丢给别人。
+	msg := "自己要求"
+	if s.hand != nil {
+		msg = "自己要求，这手牌打完生效"
+	}
+	s.deliver([]poker.Event{{
+		Type: poker.EventSitOut, Player: st.name, Message: msg, Seats: s.seatViews(),
+	}})
+}
+
+func (s *Server) handleSitIn(st *seat) {
+	if st.stack+st.pendingTopUp == 0 {
+		st.c.send(poker.Event{
+			Type: poker.EventError, Code: "no_chips",
+			Message: "一分钱都没有，先 topup 再回座",
+		})
+		return
+	}
+	st.requestedOut = false
+	s.deliver([]poker.Event{{
+		Type: poker.EventSitIn, Player: st.name, Seats: s.seatViews(),
+	}})
 }
 
 // deliver 是事件出门的唯一关口，也是 ADR-0006 那条可见性不变量的落地点：
@@ -577,7 +703,7 @@ func (s *Server) deliver(events []poker.Event) {
 func (s *Server) activeSeats() []*seat {
 	var out []*seat
 	for _, st := range s.seats {
-		if st.online() && !st.sittingOut && st.stack > 0 {
+		if !st.sittingOut() {
 			out = append(out, st)
 		}
 	}
@@ -645,7 +771,7 @@ func (s *Server) seatViews() []poker.SeatView {
 		out[i] = poker.SeatView{
 			Player:     st.name,
 			Stack:      st.stack,
-			SittingOut: st.sittingOut,
+			SittingOut: st.sittingOut(),
 		}
 	}
 	return out
@@ -715,6 +841,8 @@ func (s *Server) readLoop(c *conn) {
 			return
 		case cmd.IsAction():
 			s.submit(request{kind: reqAction, c: c, cmd: cmd})
+		case cmd.IsSeatCommand():
+			s.submit(request{kind: reqSeat, c: c, cmd: cmd})
 		default:
 			c.send(poker.Event{
 				Type:    poker.EventError,
