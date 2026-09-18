@@ -88,33 +88,31 @@ $ poker verify ~/.poker/history/TABLEC-20260918-120358.jsonl
 `poker history` 是给人看的那一半——复盘某一手，或者拉一张战绩表：
 
 ```console
-$ poker history ~/.poker/history/TABLEF-*.jsonl --hand 3
-── 第 3 手 ──  TABLEF  2026-09-18 16:36:33  盲注 1/2  庄家 bot1
-   种子 10163542570009745121
-   筹码  bot1 200 | bot2 200
-   底牌  bot1 Qc Tc | bot2 Js 3d
+$ poker history ~/.poker/history/PKR234-*.jsonl --hand 2
+── 第 2 手 ──  PKR234  2026-09-18 16:59:12  盲注 1/2  庄家 bot1
+   种子 6758751650239165124
+   筹码  bot2 200 | bot1 199 | 我 201
+   底牌  bot2 J♦ K♠ | bot1 K♥ 6♦ | 我 6♣ 7♣
 
    翻牌前
-     bot1       跟注 1
+     bot1       弃牌
+     我         跟注 1
      bot2       过牌
 
-   翻牌  Qd As 5s
-     bot2       过牌
-     bot1       过牌
-   ...
-   摊牌
-     bot1 Qc Tc → 两对（As Qc Qd 5s 5c）
-     bot2 Js 3d → 一对（As Qd Js 5s 5c）
+   翻牌  Q♣ 8♣ 3♣
+     我         下注到 2
+     bot2       弃牌
 
-   底池 12 → bot1
-   结束  bot1 206 (+6) | bot2 194 (-6)
+   底池 6 → 我
+   结束  bot2 198 (-2) | bot1 199 (+0) | 我 203 (+2)
 
-$ poker history ~/.poker/history/TABLEF-*.jsonl --stats
-共 19 手牌
+$ poker history ~/.poker/history/PKR234-*.jsonl --stats
+共 5 手牌
 
-玩家                 手数      赢      净筹码
-bot1               19     10       +3
-bot2               19      9       -3
+玩家             手数     赢   净筹码
+bot2                5      1       +5
+bot1                5      1       +1
+我                  5      3       -6
 ```
 
 历史是上帝视角的（所有人的底牌都在里面），跟发给玩家的事件流不是一回事——
@@ -143,6 +141,7 @@ cmd/poker/         子命令入口
 internal/poker/    牌局纯核心：牌、牌堆、牌力、底池、一手牌的状态机、事件
 internal/protocol/ 客户端与服务端之间的 wire 格式（说什么）
 internal/transport/ 怎么连上一张牌桌（怎么连）：接口 + 同机实现 + 内存实现
+internal/textui/   在终端上长什么样：花色符号、按显示列宽对齐
 internal/history/  手牌历史：记录、只追加落盘、重放校验
 internal/server/   牌桌（一个进程一张桌）
 internal/client/   人类客户端与机器人客户端
@@ -151,6 +150,11 @@ internal/client/   人类客户端与机器人客户端
 依赖方向单向朝内：`internal/poker/` 不 import 任何其他内部包，也不含任何 IO、goroutine 或 `time.Now()`（ADR-0012）。
 这条约束是 `--seed` 可复现测试与可见性测试共同的前提，是整个项目里最容易被悄悄侵蚀的一条。
 一手牌是一个纯状态机：`NewHand` 起局，`Apply(玩家, 动作)` 推进，每次推进返回该发出去的事件。
+
+牌在屏幕上是 `A♠`，在线路和历史文件里是 `"As"`，两者不是一个东西：前者归 `internal/textui`，
+后者是 `poker.Card.String()`。混成一个的话，改一次显示就会把 JSONL 的 wire 格式和
+已经存下的手牌历史一起改掉——照着 docs/agent.md 写的 agent 会当场解析失败，
+旧历史文件也再也 verify 不过，而这两样都不会有编译错误。
 
 「怎么连上一张牌桌」收敛在 `internal/transport` 后面（ADR-0001）：服务端拿到的是 `net.Listener`，
 客户端拿到的是 `net.Conn`，中间走 Unix socket 还是别的都不归它们管。

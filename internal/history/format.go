@@ -3,10 +3,12 @@ package history
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/xujnan/poker-cli/internal/poker"
+	"github.com/xujnan/poker-cli/internal/textui"
 )
 
 // Format 把一条记录渲染成人能读的复盘。
@@ -122,7 +124,7 @@ func formatAction(a poker.ActionRecord) string {
 	default:
 		what = a.Action
 	}
-	line := fmt.Sprintf("%-10s %s", a.Player, what)
+	line := textui.Pad(a.Player, 10) + " " + what
 	if a.Forced {
 		line += "（代打）"
 	}
@@ -150,16 +152,7 @@ func cardsAt(cs []poker.Card, from, to int) []poker.Card {
 	return cs[from:to]
 }
 
-func cards(cs []poker.Card) string {
-	if len(cs) == 0 {
-		return "-"
-	}
-	parts := make([]string, len(cs))
-	for i, c := range cs {
-		parts[i] = c.String()
-	}
-	return strings.Join(parts, " ")
-}
+func cards(cs []poker.Card) string { return textui.Cards(cs) }
 
 // PlayerStats 是一个玩家在一段历史里的战绩。
 type PlayerStats struct {
@@ -216,9 +209,14 @@ func (s *Summary) Players() []PlayerStats {
 func (s *Summary) String() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "共 %d 手牌\n\n", s.Hands)
-	fmt.Fprintf(&b, "%-14s %6s %6s %8s\n", "玩家", "手数", "赢", "净筹码")
+	fmt.Fprintf(&b, "%s %s %s %s\n",
+		textui.Pad("玩家", 14), textui.PadLeft("手数", 6), textui.PadLeft("赢", 6), textui.PadLeft("净筹码", 8))
 	for _, p := range s.Players() {
-		fmt.Fprintf(&b, "%-14s %6d %6d %+8d\n", p.Player, p.Hands, p.Won, p.Net)
+		fmt.Fprintf(&b, "%s %s %s %s\n",
+			textui.Pad(p.Player, 14),
+			textui.PadLeft(strconv.Itoa(p.Hands), 6),
+			textui.PadLeft(strconv.Itoa(p.Won), 6),
+			textui.PadLeft(fmt.Sprintf("%+d", p.Net), 8))
 	}
 	return b.String()
 }

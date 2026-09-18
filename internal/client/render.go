@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/xujnan/poker-cli/internal/poker"
+	"github.com/xujnan/poker-cli/internal/textui"
 )
 
 // Render 把一条事件渲染成一行（或几行）中文。
@@ -54,7 +55,8 @@ func Render(ev poker.Event) string {
 		lines := make([]string, 0, len(ev.Showdown)+1)
 		lines = append(lines, "摊牌：")
 		for _, e := range ev.Showdown {
-			lines = append(lines, fmt.Sprintf("  %-10s %s  →  %s（%s）", e.Player, cards(e.Cards), e.Category, cards(e.Best)))
+			lines = append(lines, fmt.Sprintf("  %s %s  →  %s（%s）",
+				textui.Pad(e.Player, 10), cards(e.Cards), e.Category, cards(e.Best)))
 		}
 		return strings.Join(lines, "\n")
 	case poker.EventPotAwarded:
@@ -187,10 +189,4 @@ func seatLine(seats []poker.SeatView) string {
 	return strings.Join(parts, " | ")
 }
 
-func cards(cs []poker.Card) string {
-	parts := make([]string, len(cs))
-	for i, c := range cs {
-		parts[i] = c.String()
-	}
-	return strings.Join(parts, " ")
-}
+func cards(cs []poker.Card) string { return textui.Cards(cs) }

@@ -4,6 +4,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -281,5 +282,39 @@ func TestScanRejectsGarbage(t *testing.T) {
 	}
 	if err := Scan(path, func(int, Record) error { return nil }); err == nil {
 		t.Fatal("坏掉的文件该报错")
+	}
+}
+
+// TestHistoryFileKeepsLetterCards：落盘的牌是机器形式（"As"），不是终端上那个 A♠。
+//
+// 历史是只追加的事实日志，格式一变，已经存下来的文件就再也读不回去了。
+// 花色符号只该活在给人看的那一层（textui），这条测试守的就是那道界线。
+func TestHistoryFileKeepsLetterCards(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hands.jsonl")
+	w, err := NewWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Append(playHand(t, 31, []int{200, 200}, 0, rand.New(rand.NewPCG(31, 1))))
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sym := range []string{"♠", "♥", "♦", "♣"} {
+		if strings.Contains(string(raw), sym) {
+			t.Fatalf("花色符号漏进历史文件了：%s", sym)
+		}
+	}
+	// 而复盘出来的那份是给人看的，符号该在。
+	var rec Record
+	if err := Scan(path, func(_ int, r Record) error { rec = r; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if out := Format(rec); !strings.ContainsAny(out, "♠♥♦♣") {
+		t.Fatalf("复盘里该用花色符号：\n%s", out)
 	}
 }
