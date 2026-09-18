@@ -9,6 +9,7 @@ import (
 	"github.com/xujnan/poker-cli/internal/client"
 	"github.com/xujnan/poker-cli/internal/poker"
 	"github.com/xujnan/poker-cli/internal/protocol"
+	"github.com/xujnan/poker-cli/internal/transport"
 )
 
 // 这个文件测的是真的跑起来的那条路：真的 Unix socket、真的几个客户端进程、真的事件流。
@@ -22,8 +23,19 @@ func startTable(t *testing.T, handDelay time.Duration) *Server {
 
 func startTableWithTimeout(t *testing.T, handDelay, timeout time.Duration) *Server {
 	t.Helper()
+	tr, err := transport.NewUnix(t.TempDir())
+	if err != nil {
+		t.Fatalf("造不出传输: %v", err)
+	}
+	return startTableOn(t, tr, handDelay, timeout)
+}
+
+// startTableOn 在指定传输上开一张牌桌。牌桌逻辑不该关心底下是什么（ADR-0001），
+// 所以这个函数收一个 Transport，测试就能拿同一套断言去跑不同的传输。
+func startTableOn(t *testing.T, tr transport.Transport, handDelay, timeout time.Duration) *Server {
+	t.Helper()
 	s, err := New(Options{
-		Dir:           t.TempDir(),
+		Transport:     tr,
 		Rand:          rand.New(rand.NewPCG(20240918, 5)),
 		HandDelay:     handDelay,
 		ActionTimeout: timeout,
@@ -45,7 +57,7 @@ func startTableWithTimeout(t *testing.T, handDelay, timeout time.Duration) *Serv
 
 func dial(t *testing.T, s *Server, name string) *client.Session {
 	t.Helper()
-	sess, err := client.Dial(s.SocketDir(), s.Code(), name, 0)
+	sess, err := client.Dial(s.Transport(), s.Code(), name, 0)
 	if err != nil {
 		t.Fatalf("%s 加入失败: %v", name, err)
 	}
@@ -171,6 +183,63 @@ func TestTwoPlayersPlayABettingHand(t *testing.T) {
 	}
 	if total != 2*testBuyin {
 		t.Fatalf("两人带入共 %d，牌局结束后桌上却有 %d", 2*testBuyin, total)
+	}
+}
+
+// TestTableRunsOverAnyTransport 是这次重构要兑现的那句话：
+// 换传输而不动牌局逻辑（ADR-0001）。
+//
+// 同一套断言跑在两个完全不同的传输上——一个走 Unix socket 和文件系统，
+// 一个纯在内存里。牌桌、客户端、事件流的代码一个字都没变。
+// 哪天真要加 TCP，这里再挂一个实现就行；要是这条测试写不出来，
+// 那个「收敛到接口后面」就只是把 net.Dial 挪了个地方。
+func TestTableRunsOverAnyTransport(t *testing.T) {
+	unix, err := transport.NewUnix(t.TempDir())
+	if err != nil {
+		t.Fatalf("造不出同机传输: %v", err)
+	}
+	transports := map[string]transport.Transport{
+		"unix":   unix,
+		"memory": transport.NewMemory(),
+	}
+
+	for name, tr := range transports {
+		t.Run(name, func(t *testing.T) {
+			s := startTableOn(t, tr, 10*time.Millisecond, 0)
+
+			alice := dial(t, s, "alice")
+			aliceEvents := autoPlay(t, alice, 1)
+			bob := dial(t, s, "bob")
+			bobEvents := autoPlay(t, bob, 1)
+
+			for who, events := range map[string][]poker.Event{
+				"alice": waitEvents(t, aliceEvents),
+				"bob":   waitEvents(t, bobEvents),
+			} {
+				if firstOf(events, poker.EventHandStart) == nil {
+					t.Fatalf("%s 没看到开局", who)
+				}
+				if countOf(events, poker.EventHoleCards) != 1 {
+					t.Fatalf("%s 该只收到一份底牌，得到 %d 份", who, countOf(events, poker.EventHoleCards))
+				}
+				end := firstOf(events, poker.EventHandEnd)
+				if end == nil {
+					t.Fatalf("%s 没看到牌局结束", who)
+				}
+				total := 0
+				for _, sv := range end.Seats {
+					total += sv.Stack
+				}
+				if total != 2*testBuyin {
+					t.Fatalf("%s 看到的筹码总额是 %d，该是 %d", who, total, 2*testBuyin)
+				}
+				for _, ev := range events {
+					if ev.Type == poker.EventError {
+						t.Fatalf("%s 收到错误事件：%s %s", who, ev.Code, ev.Message)
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -420,7 +489,7 @@ func TestReconnectReclaimsSeatAndStack(t *testing.T) {
 	// 等服务端处理完断线。
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		again, err := client.Dial(s.SocketDir(), s.Code(), "alice", 0)
+		again, err := client.Dial(s.Transport(), s.Code(), "alice", 0)
 		if err != nil {
 			t.Fatalf("alice 重连失败: %v", err)
 		}
@@ -465,7 +534,7 @@ func TestSittingOutPlayerSeesOnlyPublicInfo(t *testing.T) {
 	dave := dial(t, s, "dave")
 	keepPlaying(t, dave)
 
-	carol, err := client.Dial(s.SocketDir(), s.Code(), "carol", 2)
+	carol, err := client.Dial(s.Transport(), s.Code(), "carol", 2)
 	if err != nil {
 		t.Fatalf("carol 加入失败: %v", err)
 	}
@@ -596,7 +665,7 @@ func TestDuplicateNameIsRejected(t *testing.T) {
 		t.Fatalf("alice 没收到牌桌快照: %v", err)
 	}
 
-	impostor, err := client.Dial(s.SocketDir(), s.Code(), "alice", 0)
+	impostor, err := client.Dial(s.Transport(), s.Code(), "alice", 0)
 	if err != nil {
 		t.Fatalf("第二个 alice 连接失败: %v", err)
 	}
@@ -639,7 +708,7 @@ func waitForError(t *testing.T, s *client.Session, code string) {
 func TestBadTableCodeNeverTouchesTheFilesystem(t *testing.T) {
 	s := startTable(t, time.Hour)
 	for _, code := range []string{"../etc", "abc", "", "ABCDE1"} {
-		if _, err := client.Dial(s.SocketDir(), code, "alice", 0); err == nil {
+		if _, err := client.Dial(s.Transport(), code, "alice", 0); err == nil {
 			t.Fatalf("%q 这种码不该连得上", code)
 		}
 	}
@@ -675,7 +744,7 @@ func TestActionWithoutHandIsRejected(t *testing.T) {
 // TestTinyBuyinIsRejected：带入连一个大盲都不够的话，当场说清楚，别让他坐下再发现打不了。
 func TestTinyBuyinIsRejected(t *testing.T) {
 	s := startTable(t, time.Hour)
-	sess, err := client.Dial(s.SocketDir(), s.Code(), "alice", 1)
+	sess, err := client.Dial(s.Transport(), s.Code(), "alice", 1)
 	if err != nil {
 		t.Fatalf("连接失败: %v", err)
 	}

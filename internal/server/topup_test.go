@@ -12,7 +12,7 @@ import (
 
 func dialWith(t *testing.T, s *Server, name string, buyin int) *client.Session {
 	t.Helper()
-	sess, err := client.Dial(s.SocketDir(), s.Code(), name, buyin)
+	sess, err := client.Dial(s.Transport(), s.Code(), name, buyin)
 	if err != nil {
 		t.Fatalf("%s 加入失败: %v", name, err)
 	}

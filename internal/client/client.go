@@ -1,6 +1,6 @@
 // Package client 连上一张牌桌，把事件流交给人或机器人。
 //
-// 人类客户端和机器人客户端共用这里的 Session：同一个 socket、同一份 JSONL 事件流、
+// 人类客户端和机器人客户端共用这里的 Session：同一条连接、同一份 JSONL 事件流、
 // 同一条代码路径（ADR-0002、ADR-0010）。两者的差别只在拿到 your_turn 之后怎么决定。
 package client
 
@@ -15,6 +15,7 @@ import (
 
 	"github.com/xujnan/poker-cli/internal/poker"
 	"github.com/xujnan/poker-cli/internal/protocol"
+	"github.com/xujnan/poker-cli/internal/transport"
 )
 
 // 输出格式（ADR-0002）。
@@ -32,22 +33,12 @@ type Session struct {
 
 // Dial 连上 Table Code 对应的牌桌并报上名字与带入。
 //
-// 「加入牌桌」在这里就是拼一次路径再连一次 socket——没有服务发现这一步（ADR-0013）。
-func Dial(dir, code, name string, buyin int) (*Session, error) {
-	if dir == "" {
-		d, err := protocol.DefaultDir()
-		if err != nil {
-			return nil, err
-		}
-		dir = d
-	}
-	path, err := protocol.SocketPath(dir, code)
+// 「怎么连上」由 tr 决定（ADR-0001）：同机是拼一个 socket 路径，跨机会是别的。
+// 客户端这边只知道自己拿到了一条 net.Conn。
+func Dial(tr transport.Transport, code, name string, buyin int) (*Session, error) {
+	conn, err := tr.Dial(code)
 	if err != nil {
 		return nil, err
-	}
-	conn, err := net.Dial("unix", path)
-	if err != nil {
-		return nil, fmt.Errorf("client: 连不上牌桌 %s（%s）：%w", strings.ToUpper(code), path, err)
 	}
 	// 名字即身份，没有握手也没有凭据（ADR-0009）。
 	if err := protocol.WriteCommand(conn, protocol.Command{Type: protocol.CmdJoin, Name: name, Buyin: buyin}); err != nil {
@@ -170,8 +161,8 @@ const helpText = `可用命令：
 
 // RunBot 跑一个机器人客户端。
 //
-// 它是一个独立进程，连的是同一个 socket，收的是同一份事件流，走的是外部 AI agent
-// 一模一样的那条路（ADR-0010）。这意味着每一次本地对战都在回归测试 agent 接口本身——
+// 它是一个独立进程，走的是同一个传输、同一份事件流，跟外部 AI agent
+// 一模一样（ADR-0010）。这意味着每一次本地对战都在回归测试 agent 接口本身——
 // 千万别为了省事把它改成服务端里的一个 goroutine，那样它天然能看到所有人的底牌，
 // ADR-0006 那条不变量对它就不成立了。
 func RunBot(s *Session, out io.Writer, rebuy bool) error {

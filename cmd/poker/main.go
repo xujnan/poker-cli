@@ -15,6 +15,7 @@ import (
 	"github.com/xujnan/poker-cli/internal/history"
 	"github.com/xujnan/poker-cli/internal/poker"
 	"github.com/xujnan/poker-cli/internal/server"
+	"github.com/xujnan/poker-cli/internal/transport"
 )
 
 const usage = `用法：
@@ -79,9 +80,17 @@ func runServe(args []string) error {
 	if *buyin == 0 {
 		*buyin = blinds.Big * defaultBuyinBigBlinds
 	}
+	home, err := pokerDir(*dir)
+	if err != nil {
+		return err
+	}
+	tr, err := transport.NewUnix(home)
+	if err != nil {
+		return err
+	}
 
 	s, err := server.New(server.Options{
-		Dir:           *dir,
+		Transport:     tr,
 		Code:          *code,
 		Rand:          newRand(*seed),
 		HandDelay:     *handDelay,
@@ -97,7 +106,7 @@ func runServe(args []string) error {
 	if !*noHistory {
 		path := *historyPath
 		if path == "" {
-			path = history.DefaultPath(s.SocketDir(), s.Code(), time.Now())
+			path = history.DefaultPath(home, s.Code(), time.Now())
 		}
 		if err := s.UseHistory(path); err != nil {
 			return err
@@ -106,7 +115,7 @@ func runServe(args []string) error {
 
 	fmt.Printf("牌桌已开：%s（盲注 %s，默认带入 %d）\n", s.Code(), blinds, *buyin)
 	fmt.Printf("加入：poker join %s --as <你的名字>\n", s.Code())
-	fmt.Printf("监听：%s\n", s.Path())
+	fmt.Printf("监听：%s\n", s.Addr())
 	if p := s.HistoryPath(); p != "" {
 		fmt.Printf("手牌历史：%s\n", p)
 	}
@@ -145,7 +154,7 @@ func runJoin(args []string) error {
 		return fmt.Errorf("--format 只能是 %s 或 %s", client.FormatText, client.FormatJSONL)
 	}
 
-	s, err := client.Dial(*dir, code, *name, *buyin)
+	s, err := dialTable(*dir, code, *name, *buyin)
 	if err != nil {
 		return err
 	}
@@ -167,7 +176,7 @@ func runBot(args []string) error {
 		return fmt.Errorf("必须用 --as 指定名字")
 	}
 
-	s, err := client.Dial(*dir, code, *name, *buyin)
+	s, err := dialTable(*dir, code, *name, *buyin)
 	if err != nil {
 		return err
 	}
@@ -208,6 +217,30 @@ func runVerify(args []string) error {
 		return fmt.Errorf("有 %d 手牌还原不回去", bad)
 	}
 	return nil
+}
+
+// pokerDir 是 poker 放 socket 和手牌历史的地方。
+func pokerDir(dir string) (string, error) {
+	if dir != "" {
+		return dir, nil
+	}
+	return transport.DefaultDir()
+}
+
+// dialTable 按当前的传输方式连上一张牌桌。
+//
+// 人和机器人走同一个函数——它们连的必须是同一条路，否则「机器人在回归测试 agent 接口」
+// 这句话就不成立了（ADR-0010）。
+func dialTable(dir, code, name string, buyin int) (*client.Session, error) {
+	home, err := pokerDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	tr, err := transport.NewUnix(home)
+	if err != nil {
+		return nil, err
+	}
+	return client.Dial(tr, code, name, buyin)
 }
 
 // parseCodeAndFlags 从 `poker join ABC123 --as alice` 这种形式里取出 Table Code。

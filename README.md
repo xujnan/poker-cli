@@ -95,14 +95,15 @@ ADR-0006 那套可见性规矩管的是事件，不是这个文件。别把记�
 - 断线接管与行动超时：没人能靠装死或拔网线冻住整张牌桌
 - Hand History 只追加落盘，每手一个自足的种子，`poker verify` 能把它们逐手重放回去
 
-还没有的：跨机联机。
+还没有的：跨机联机（传输已经在接口后面了，加 TCP 时不用动牌局逻辑）。
 
 ## 目录
 
 ```
 cmd/poker/         子命令入口
 internal/poker/    牌局纯核心：牌、牌堆、牌力、底池、一手牌的状态机、事件
-internal/protocol/ 客户端与服务端之间的 wire 格式
+internal/protocol/ 客户端与服务端之间的 wire 格式（说什么）
+internal/transport/ 怎么连上一张牌桌（怎么连）：接口 + 同机实现 + 内存实现
 internal/history/  手牌历史：记录、只追加落盘、重放校验
 internal/server/   牌桌（一个进程一张桌）
 internal/client/   人类客户端与机器人客户端
@@ -111,6 +112,11 @@ internal/client/   人类客户端与机器人客户端
 依赖方向单向朝内：`internal/poker/` 不 import 任何其他内部包，也不含任何 IO、goroutine 或 `time.Now()`（ADR-0012）。
 这条约束是 `--seed` 可复现测试与可见性测试共同的前提，是整个项目里最容易被悄悄侵蚀的一条。
 一手牌是一个纯状态机：`NewHand` 起局，`Apply(玩家, 动作)` 推进，每次推进返回该发出去的事件。
+
+「怎么连上一张牌桌」收敛在 `internal/transport` 后面（ADR-0001）：服务端拿到的是 `net.Listener`，
+客户端拿到的是 `net.Conn`，中间走 Unix socket 还是别的都不归它们管。
+包里有两个实现——同机的和纯内存的——跑的是同一套一致性断言，
+牌局的端到端测试也在两者上各跑一遍。只有一个实现的接口，形状是照着那个实现长的。
 
 ## 测试
 
@@ -131,6 +137,8 @@ go test -race ./...
   规则上完全合法，但一手牌要走上百个动作。
 - `internal/server/topup_test.go` —— 补码只在两手牌之间落地（这条能直接从事件流上看出来：
   一条到账的 `top_up` 绝不该夹在 `hand_start` 和 `hand_end` 中间），以及破产→补码→牌桌接着跑。
+- `internal/transport/transport_test.go` —— 同一套断言跑在每个传输实现上，分清哪些是「传输的约定」、
+  哪些只是「Unix socket 恰好如此」。
 - `internal/history/history_test.go` 与 `internal/server/history_test.go` —— 记下来的东西必须真的还原得回去：
   几百手随机对局逐条重放校验，外加十种「记录被改过」的情形都必须报错。
   一个什么都说「对」的校验器比没有校验器更糟，它会让人以为历史是可信的。

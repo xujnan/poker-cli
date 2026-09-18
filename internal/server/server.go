@@ -1,5 +1,7 @@
-// Package server 是牌桌的唯一权威（ADR-0003）：一个进程一张牌桌，监听
-// ~/.poker/<CODE>.sock，Table Code 就是文件名（ADR-0013）。
+// Package server 是牌桌的唯一权威（ADR-0003）：一个进程一张牌桌。
+//
+// 牌桌怎么被连上不归这里管——它拿到的是一个 net.Listener，中间是 Unix socket
+// 还是别的什么，由 transport 决定（ADR-0001）。
 //
 // 并发模型只有一条规矩：牌桌状态归一个 goroutine 独占，别人只能往 channel 里递请求。
 // 每条连接另有两个 goroutine——一个读命令，一个写事件——它们碰不到牌桌状态，
@@ -13,8 +15,6 @@ import (
 	"log"
 	"math/rand/v2"
 	"net"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -22,12 +22,13 @@ import (
 	"github.com/xujnan/poker-cli/internal/history"
 	"github.com/xujnan/poker-cli/internal/poker"
 	"github.com/xujnan/poker-cli/internal/protocol"
+	"github.com/xujnan/poker-cli/internal/transport"
 )
 
 // Options 是启动一张牌桌需要的东西。
 type Options struct {
-	// Dir 是 socket 所在目录，留空取 ~/.poker。
-	Dir string
+	// Transport 决定客户端怎么连上这张牌桌（ADR-0001）。必填。
+	Transport transport.Transport
 	// Code 留空则随机生成一个 Table Code。
 	Code string
 	// Rand 是牌桌的随机源，必须由调用方注入——serve 的 --seed 全靠它（ADR-0004）。
@@ -67,9 +68,8 @@ func (st *seat) sittingOut() bool {
 
 // Server 是一张牌桌。
 type Server struct {
-	dir       string
+	tr        transport.Transport
 	code      string
-	path      string
 	ln        net.Listener
 	rng       *rand.Rand
 	handDelay time.Duration
@@ -110,16 +110,8 @@ func New(opts Options) (*Server, error) {
 	if opts.Buyin < opts.Blinds.Big {
 		return nil, fmt.Errorf("server: 默认带入 %d 还不够一个大盲", opts.Buyin)
 	}
-	dir := opts.Dir
-	if dir == "" {
-		d, err := protocol.DefaultDir()
-		if err != nil {
-			return nil, err
-		}
-		dir = d
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("server: 无法创建 %s: %w", dir, err)
+	if opts.Transport == nil {
+		return nil, errors.New("server: 必须指定传输方式")
 	}
 
 	logOut := opts.Log
@@ -127,7 +119,7 @@ func New(opts Options) (*Server, error) {
 		logOut = io.Discard
 	}
 	s := &Server{
-		dir:       dir,
+		tr:        opts.Transport,
 		rng:       opts.Rand,
 		handDelay: opts.HandDelay,
 		timeout:   opts.ActionTimeout,
@@ -141,33 +133,25 @@ func New(opts Options) (*Server, error) {
 
 	if opts.Code != "" {
 		code := strings.ToUpper(opts.Code)
-		path, err := protocol.SocketPath(dir, code)
+		ln, err := s.tr.Listen(code)
 		if err != nil {
 			return nil, err
 		}
-		ln, err := net.Listen("unix", path)
-		if err != nil {
-			return nil, fmt.Errorf("server: 无法监听 %s: %w", path, err)
-		}
-		s.code, s.path, s.ln = code, path, ln
+		s.code, s.ln = code, ln
 		return s, nil
 	}
 
 	// 没指定 code 就随机生成。撞上一张已经开着的同码牌桌时换一个再来——
-	// 监听失败本身就是「这个码被占了」最可靠的判据，不必先 stat 一次。
+	// 监听失败本身就是「这个码被占了」最可靠的判据，不必先去问一遍。
 	var lastErr error
 	for i := 0; i < 10; i++ {
 		code := poker.NewTableCode(s.rng)
-		path, err := protocol.SocketPath(dir, code)
-		if err != nil {
-			return nil, err
-		}
-		ln, err := net.Listen("unix", path)
+		ln, err := s.tr.Listen(code)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		s.code, s.path, s.ln = code, path, ln
+		s.code, s.ln = code, ln
 		return s, nil
 	}
 	return nil, fmt.Errorf("server: 连续 10 次都没能占下一个 Table Code: %w", lastErr)
@@ -176,8 +160,11 @@ func New(opts Options) (*Server, error) {
 // Code 返回这张牌桌的 Table Code。
 func (s *Server) Code() string { return s.code }
 
-// Path 返回 socket 路径。
-func (s *Server) Path() string { return s.path }
+// Addr 返回一个人能读的地址，打印给用户看。
+func (s *Server) Addr() string { return s.tr.Describe(s.code) }
+
+// Transport 返回这张牌桌用的传输方式，客户端拿它来连。
+func (s *Server) Transport() transport.Transport { return s.tr }
 
 // Blinds 返回这张桌的盲注。
 func (s *Server) Blinds() poker.Blinds { return s.blinds }
@@ -290,8 +277,6 @@ func (s *Server) Close() error {
 		s.mu.Unlock()
 	})
 	s.wg.Wait()
-	// unix listener 关闭时会删掉 socket 文件，这里兜一次底。
-	_ = os.Remove(s.path)
 
 	if s.history != nil {
 		// 丢过东西就说出来。历史是尽力而为的（ADR-0016），但「尽力」不等于「悄悄地」。
@@ -944,6 +929,3 @@ func validName(name string) error {
 	}
 	return nil
 }
-
-// SocketDir 返回这张牌桌 socket 所在的目录，主要给测试与诊断用。
-func (s *Server) SocketDir() string { return filepath.Dir(s.path) }

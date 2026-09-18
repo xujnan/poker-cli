@@ -11,14 +11,19 @@ import (
 	"github.com/xujnan/poker-cli/internal/history"
 	"github.com/xujnan/poker-cli/internal/poker"
 	"github.com/xujnan/poker-cli/internal/protocol"
+	"github.com/xujnan/poker-cli/internal/transport"
 )
 
 // startTableWithHistory 开一张会写历史的牌桌，并把历史文件路径一并给出。
 func startTableWithHistory(t *testing.T) (*Server, string) {
 	t.Helper()
 	dir := t.TempDir()
+	tr, err := transport.NewUnix(dir)
+	if err != nil {
+		t.Fatalf("造不出传输: %v", err)
+	}
 	s, err := New(Options{
-		Dir:           dir,
+		Transport:     tr,
 		Rand:          rand.New(rand.NewPCG(20240918, 5)),
 		HandDelay:     5 * time.Millisecond,
 		ActionTimeout: 50 * time.Millisecond,
