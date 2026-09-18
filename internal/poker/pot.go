@@ -62,6 +62,15 @@ func BuildPots(seats []PotSeat) []Pot {
 		if amount == 0 {
 			continue
 		}
+		// 相邻两层争夺的人一模一样时并成一个池。
+		//
+		// 不并的话，一手谁都没全下的普通牌也会被切开：小盲投 1、大盲投 2，
+		// 于是分出「1 那层」和「2 那层」——数学上不错，但那不叫边池。
+		// 边池的意义是「这部分钱他匹配不了、没资格争」，有资格的人没变就没有边池。
+		if n := len(pots); n > 0 && sameEligible(pots[n-1].Eligible, eligible) {
+			pots[n-1].Amount += amount
+			continue
+		}
 		if len(eligible) == 0 {
 			// 这一层的钱全是弃牌者投的，没人有资格争。正常牌局走不到这里
 			// （总得有人把这些注匹配下来），兜底是并进上一个池，绝不让筹码凭空消失。
@@ -127,6 +136,19 @@ func AwardPots(pots []Pot, ranks map[string]HandRank, order []string) ([]Pot, ma
 		out = append(out, pot)
 	}
 	return out, payout
+}
+
+// sameEligible 判断两层的资格名单是否一致。名单是按座位顺序生成的，逐位比就够了。
+func sameEligible(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // sortByOrder 按座位顺序重排赢家，让「多出来的筹码归谁」有个确定的答案。

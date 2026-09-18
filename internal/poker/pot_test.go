@@ -184,3 +184,44 @@ func TestBuildPotsThreeWayAllIn(t *testing.T) {
 		t.Fatalf("三层加起来该是 260，得到 %d", total)
 	}
 }
+
+// TestBuildPotsMergesLayersWithTheSameContenders：没人被挡在外面就不该有边池。
+//
+// 一手谁都没全下的普通牌，小盲投 1、大盲投 2，按投入额分层会分出两层。
+// 数学上不错，但那两层争夺的是同一批人——切开只会让人以为这手牌出现了边池。
+func TestBuildPotsMergesLayersWithTheSameContenders(t *testing.T) {
+	// 大盲捡走盲注：两个人投入不同，但有资格的自始至终只有他一个。
+	pots := potOf(
+		PotSeat{Player: "alice", Committed: 2},
+		PotSeat{Player: "bob", Committed: 1, Folded: true},
+	)
+	if len(pots) != 1 {
+		t.Fatalf("没人全下，该只有一个底池，得到 %d 个：%+v", len(pots), pots)
+	}
+	if pots[0].Amount != 3 {
+		t.Fatalf("底池该是 3，得到 %d", pots[0].Amount)
+	}
+
+	// 弃牌者投得少但没人被挡住，同样不该切。
+	pots = potOf(
+		PotSeat{Player: "alice", Committed: 100},
+		PotSeat{Player: "bob", Committed: 40, Folded: true},
+		PotSeat{Player: "carol", Committed: 100},
+	)
+	if len(pots) != 1 {
+		t.Fatalf("没人全下，该只有一个底池，得到 %d 个：%+v", len(pots), pots)
+	}
+	if pots[0].Amount != 240 {
+		t.Fatalf("底池该是 240，得到 %d", pots[0].Amount)
+	}
+
+	// 真有人全下得少，才该切出边池。
+	pots = potOf(
+		PotSeat{Player: "alice", Committed: 50},
+		PotSeat{Player: "bob", Committed: 100},
+		PotSeat{Player: "carol", Committed: 100},
+	)
+	if len(pots) != 2 {
+		t.Fatalf("有人全下得少，该切出边池，得到 %d 个池", len(pots))
+	}
+}

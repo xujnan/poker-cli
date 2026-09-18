@@ -30,6 +30,22 @@ type seatState struct {
 	hole   []Card
 }
 
+// ActionRecord 是手牌历史里的一个动作（CONTEXT 里 Hand History 要求的「每个 Action」）。
+//
+// 它记的是已经发生的事实，不是命令。两个数额都留着，因为它们各有各的用处：
+// Amount 是这一下实际投进去多少筹码，看牌局流水时要的是它；
+// To 是他在这条街上的投入因此变成了多少，重放时要的是它——bet 是「推到多少」的语义（ADR-0005），
+// 只记增量就没法原样重放。
+type ActionRecord struct {
+	Player string `json:"player"`
+	Street string `json:"street"`
+	Action string `json:"action"`
+	Amount int    `json:"amount,omitempty"`
+	To     int    `json:"to,omitempty"`
+	// Forced 表示这一下不是他自己按的（超时、掉线、或连续非法之后代打）。
+	Forced bool `json:"forced,omitempty"`
+}
+
 // HandResult 是一手牌打完之后的全部事实，包括所有人的底牌。
 //
 // 它与事件序列的区别是可见性：事件是分别投递给各个玩家的、经过裁剪的视图，
@@ -41,8 +57,10 @@ type HandResult struct {
 	Hole      map[string][]Card
 	Community []Card
 	// Ranks 只含摊牌的人。弃牌者不在里面，他的牌从头到尾没参与过比较。
-	Ranks   map[string]HandRank
-	Folded  []string
+	Ranks  map[string]HandRank
+	Folded []string
+	// Actions 是这手牌里发生过的每一个动作，按发生顺序。
+	Actions []ActionRecord
 	Pots    []Pot
 	Payout  map[string]int
 	Winners []string
@@ -68,6 +86,7 @@ type Hand struct {
 	// lastRaise 是本 Street 上最后一次加注的增量，下一个人的最小加注额由它决定。
 	lastRaise int
 	illegal   []int
+	actions   []ActionRecord
 	done      bool
 	result    HandResult
 }
@@ -162,16 +181,36 @@ func (h *Hand) Apply(player string, a Action) []Event {
 		}
 		// 第三次了。能 check 就 check，否则 fold——跟行动超时同一套处理。
 		h.illegal[i] = 0
-		forced := h.forcedAction(i)
-		events := h.exec(i, forced)
-		events[0].Forced = true
-		events[0].Message = fmt.Sprintf("连续 %d 次非法动作，按超时规则处理", maxIllegalActions)
-		out = append(out, events...)
+		why := fmt.Sprintf("连续 %d 次非法动作，按超时规则处理", maxIllegalActions)
+		out = append(out, h.exec(i, h.forcedAction(i), true, why)...)
 		return append(out, h.step()...)
 	}
 
 	h.illegal[i] = 0
-	out := h.exec(i, a)
+	out := h.exec(i, a, false, "")
+	return append(out, h.step()...)
+}
+
+// ApplyForced 替某人做决定：能过牌就过牌，否则弃牌，并把这一下记成不是他自己按的。
+//
+// 服务端在玩家掉线或行动超时的时候用它接手——不接手的话，一个人拔掉网线
+// 就能让整张牌桌永远停在他那一轮。规则跟连续非法动作那条是同一套（ADR-0011）。
+//
+// 「这一下是代打」这件事由这里统一标进事件和历史记录，服务端不该自己去改事件字段：
+// 标记散在两个地方，迟早有一处漏掉。
+func (h *Hand) ApplyForced(player, why string) []Event {
+	if h.done {
+		return []Event{h.errorTo(player, "hand_over", "这手牌已经结束了")}
+	}
+	i := h.indexOf(player)
+	if i < 0 {
+		return []Event{h.errorTo(player, "not_in_hand", "你不在这手牌里")}
+	}
+	if i != h.turn {
+		return []Event{h.errorTo(player, "not_your_turn", fmt.Sprintf("现在轮到 %s 行动", h.seats[h.turn].player))}
+	}
+	h.illegal[i] = 0
+	out := h.exec(i, h.forcedAction(i), true, why)
 	return append(out, h.step()...)
 }
 
@@ -194,18 +233,6 @@ func (h *Hand) Result() HandResult { return h.result }
 
 // Players 返回参与这手牌的所有人。
 func (h *Hand) Players() []string { return h.playerNames() }
-
-// ForcedAction 返回替某人做决定时该做的那个动作：能过牌就过牌，否则弃牌。
-//
-// 服务端在玩家掉线时用它接手——不接手的话，一个人拔掉网线就能让整张牌桌永远停在他那一轮。
-// 规则跟连续非法动作那条是同一套（ADR-0011）。
-func (h *Hand) ForcedAction(player string) Action {
-	i := h.indexOf(player)
-	if i < 0 {
-		return Action{Kind: Fold}
-	}
-	return h.forcedAction(i)
-}
 
 // --- 推进 ---
 
@@ -375,6 +402,7 @@ func (h *Hand) buildResult(ranks map[string]HandRank, pots []Pot, payout map[str
 		Hole:      make(map[string][]Card, len(h.seats)),
 		Community: cloneCards(h.community),
 		Ranks:     ranks,
+		Actions:   append([]ActionRecord(nil), h.actions...),
 		Pots:      pots,
 		Payout:    payout,
 		Winners:   winners,
@@ -451,50 +479,65 @@ func (h *Hand) validate(i int, a Action) *Event {
 	return &e
 }
 
-// exec 执行一个已经验证过的动作。
-func (h *Hand) exec(i int, a Action) []Event {
+// exec 执行一个已经验证过的动作，同时把它记进手牌历史。
+//
+// forced 为真表示这一下不是玩家自己按的（超时、掉线、连续非法之后代打），
+// why 是给人看的原因。
+func (h *Hand) exec(i int, a Action, forced bool, why string) []Event {
 	s := h.seats[i]
 	high := h.highStreet()
 	s.acted = true
+	// 先记下街名：commit / raiseTo 都不会改它，但 step 之后就变了。
+	street := h.street.String()
 
+	var name string
+	var amount int
 	switch a.Kind {
 	case Fold:
 		s.folded = true
-		return []Event{h.actionEvent(s, "fold", 0)}
+		name = "fold"
 
 	case Check:
-		return []Event{h.actionEvent(s, "check", 0)}
+		name = "check"
 
 	case Call:
 		// 筹码不够跟满就是推光，这不是错误，是德州扑克本来的样子。
-		amount := min(high-s.street, s.stack)
+		amount = min(high-s.street, s.stack)
 		h.commit(s, amount)
-		name := "call"
+		name = "call"
 		if s.allin {
 			name = "allin"
 		}
-		return []Event{h.actionEvent(s, name, amount)}
 
 	case AllIn:
-		amount := s.stack
+		amount = s.stack
 		to := s.street + amount
 		h.commit(s, amount)
 		if to > high {
 			h.raiseTo(i, to, high)
 		}
-		return []Event{h.actionEvent(s, "allin", amount)}
+		name = "allin"
 
 	case BetTo:
-		amount := a.Amount - s.street
+		amount = a.Amount - s.street
 		h.commit(s, amount)
 		h.raiseTo(i, a.Amount, high)
-		name := "bet"
+		name = "bet"
 		if s.allin {
 			name = "allin"
 		}
-		return []Event{h.actionEvent(s, name, amount)}
+
+	default:
+		panic("poker: exec 收到未知动作")
 	}
-	panic("poker: exec 收到未知动作")
+
+	h.actions = append(h.actions, ActionRecord{
+		Player: s.player, Street: street, Action: name,
+		Amount: amount, To: s.street, Forced: forced,
+	})
+	ev := h.actionEvent(s, name, amount)
+	ev.Forced, ev.Message = forced, why
+	return []Event{ev}
 }
 
 func (h *Hand) commit(s *seatState, amount int) {

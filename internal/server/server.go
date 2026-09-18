@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xujnan/poker-cli/internal/history"
 	"github.com/xujnan/poker-cli/internal/poker"
 	"github.com/xujnan/poker-cli/internal/protocol"
 )
@@ -85,10 +86,14 @@ type Server struct {
 	mu    sync.Mutex
 	conns map[*conn]struct{}
 
+	// history 在 Serve 之前定下来，之后只由牌桌 goroutine 用。
+	history *history.Writer
+
 	// 以下字段只有牌桌 goroutine 能读写。
 	seats      []*seat
 	hand       *poker.Hand
 	handNo     int
+	handMeta   handMeta
 	lastButton string
 	// armedFor 是行动计时器当前盯着的那个人。
 	armedFor string
@@ -177,6 +182,33 @@ func (s *Server) Path() string { return s.path }
 // Blinds 返回这张桌的盲注。
 func (s *Server) Blinds() poker.Blinds { return s.blinds }
 
+// handMeta 是当前这手牌开局时的样子。牌打完之后座位上的筹码已经变了，
+// 写历史要的是「开局前」那一份，所以得在发牌之前先留一份底。
+type handMeta struct {
+	seed   uint64
+	button string
+	seats  []history.Seat
+	at     time.Time
+}
+
+// UseHistory 让这张牌桌把每手牌追加写进 path（ADR-0008）。必须在 Serve 之前调用。
+func (s *Server) UseHistory(path string) error {
+	w, err := history.NewWriter(path)
+	if err != nil {
+		return err
+	}
+	s.history = w
+	return nil
+}
+
+// HistoryPath 是历史文件的位置，没开历史时返回空串。
+func (s *Server) HistoryPath() string {
+	if s.history == nil {
+		return ""
+	}
+	return s.history.Path()
+}
+
 // Serve 接受连接直到 Close 被调用。
 func (s *Server) Serve() error {
 	if !s.goTracked(s.tableLoop) {
@@ -260,6 +292,17 @@ func (s *Server) Close() error {
 	s.wg.Wait()
 	// unix listener 关闭时会删掉 socket 文件，这里兜一次底。
 	_ = os.Remove(s.path)
+
+	if s.history != nil {
+		// 丢过东西就说出来。历史是尽力而为的（ADR-0016），但「尽力」不等于「悄悄地」。
+		if n := s.history.Dropped(); n > 0 {
+			s.log.Printf("有 %d 手牌因为写盘跟不上被丢掉了", n)
+		}
+		if n := s.history.Failed(); n > 0 {
+			s.log.Printf("有 %d 手牌写盘失败", n)
+		}
+		return s.history.Close()
+	}
 	return nil
 }
 
@@ -382,18 +425,10 @@ func (s *Server) tableLoop() {
 	}
 }
 
-// forceAction 替某人做决定，并把「这一下不是他自己按的」标在事件上。
-//
-// 牌桌上其他人（和事后翻记录的人）得能分清「他选择了弃牌」和「他没说话，系统替他弃了」。
+// forceAction 替某人做决定。「这一下不是他自己按的」这件事由核心统一标进事件和历史，
+// 服务端不该自己去改事件字段——标记散在两个地方，迟早有一处漏掉。
 func (s *Server) forceAction(player, why string) []poker.Event {
-	events := s.hand.Apply(player, s.hand.ForcedAction(player))
-	for i := range events {
-		if events[i].Type == poker.EventAction && events[i].Player == player {
-			events[i].Forced = true
-			events[i].Message = why
-		}
-	}
-	return events
+	return s.hand.ApplyForced(player, why)
 }
 
 func (s *Server) handleJoin(c *conn, cmd protocol.Command) {
@@ -512,10 +547,19 @@ func (s *Server) startHand() {
 	button := s.buttonIndex(active)
 	s.lastButton = active[button].name
 
+	// 牌桌的随机源不直接拿去洗牌，而是给这一手牌抽一个种子（ADR-0016）。
+	// 这样历史里的每条记录都自足：拿着它就能单独重放第 37 手，
+	// 不必先把前 36 手连同每个人的每个动作原样重来一遍。
+	seed := s.rng.Uint64()
+	before := make([]history.Seat, len(active))
+	for i, st := range active {
+		before[i] = history.Seat{Player: st.name, Stack: st.stack}
+	}
+
 	s.handNo++
-	deck := poker.NewDeck(s.rng)
-	hand, events := poker.NewHand(s.handNo, seats, button, s.blinds, deck)
+	hand, events := poker.NewHand(s.handNo, seats, button, s.blinds, poker.NewDeck(poker.RandFor(seed)))
 	s.hand = hand
+	s.handMeta = handMeta{seed: seed, button: active[button].name, seats: before, at: time.Now()}
 	s.deliverAndDrive(events)
 }
 
@@ -552,6 +596,11 @@ func (s *Server) settleHand() {
 	}
 	s.hand = nil
 	s.log.Printf("第 %d 手结束，底池 %d，赢家 %s", res.Number, res.Pot, strings.Join(res.Winners, "、"))
+
+	if s.history != nil {
+		m := s.handMeta
+		s.history.Append(history.Of(s.code, m.seed, s.blinds, m.button, m.seats, m.at, res))
+	}
 
 	// Stack 归零的人自动进入 Sitting Out——这是 Sitting Out 定义里就写着的一条。
 	// 他还留在座位上，也还收得到牌桌上的公开信息，只是不再被发牌，补了码就能回来。

@@ -60,6 +60,28 @@ go build -o poker ./cmd/poker
 
 `--seed` 给定时牌序完全可复现（ADR-0004）——前提是座位顺序也一样，因为发牌是按座位轮着发的。
 
+## 手牌历史
+
+每手牌结束时，一条含**随机种子、全部底牌与每个动作**的完整记录会追加写进
+`~/.poker/history/<CODE>-<开桌时间>.jsonl`（ADR-0008）。`--no-history` 关掉它。
+
+每条记录都是**自足**的：种子、座位顺序、庄家位、盲注四样凑齐，就能把第 37 手单独重放出来，
+不必先把前 36 手连同每个人的每个动作原样重来（ADR-0016）。`poker verify` 干的就是这件事：
+
+```console
+$ poker verify ~/.poker/history/TABLEC-20260918-120358.jsonl
+重放了 528 手牌，0 手对不上。
+```
+
+对不上的时候它会指出问题出在哪一层：
+
+```console
+✗ 第 2 行（第 2 手，种子 13105718115652666056）：按种子重放，bot3 的底牌对不上：记的是 [Jd Qd]，重放出来是 [4d Ad]
+```
+
+历史是上帝视角的（所有人的底牌都在里面），跟发给玩家的事件流不是一回事——
+ADR-0006 那套可见性规矩管的是事件，不是这个文件。别把记录当事件发出去。
+
 ## 现在做到哪了
 
 两刀下来，一局完整的无限注德州扑克已经能打了：
@@ -71,8 +93,9 @@ go build -o poker ./cmd/poker
 - Stack、Buy-in、Top-up（补码），输光自动进入 Sitting Out，补了码就回来
 - 手动 `sitout` / `sitin`；`--rebuy` 让无人值守的牌桌一直打下去
 - 断线接管与行动超时：没人能靠装死或拔网线冻住整张牌桌
+- Hand History 只追加落盘，每手一个自足的种子，`poker verify` 能把它们逐手重放回去
 
-还没有的：Hand History 落盘、跨机联机。
+还没有的：跨机联机。
 
 ## 目录
 
@@ -80,6 +103,7 @@ go build -o poker ./cmd/poker
 cmd/poker/         子命令入口
 internal/poker/    牌局纯核心：牌、牌堆、牌力、底池、一手牌的状态机、事件
 internal/protocol/ 客户端与服务端之间的 wire 格式
+internal/history/  手牌历史：记录、只追加落盘、重放校验
 internal/server/   牌桌（一个进程一张桌）
 internal/client/   人类客户端与机器人客户端
 ```
@@ -107,6 +131,9 @@ go test -race ./...
   规则上完全合法，但一手牌要走上百个动作。
 - `internal/server/topup_test.go` —— 补码只在两手牌之间落地（这条能直接从事件流上看出来：
   一条到账的 `top_up` 绝不该夹在 `hand_start` 和 `hand_end` 中间），以及破产→补码→牌桌接着跑。
+- `internal/history/history_test.go` 与 `internal/server/history_test.go` —— 记下来的东西必须真的还原得回去：
+  几百手随机对局逐条重放校验，外加十种「记录被改过」的情形都必须报错。
+  一个什么都说「对」的校验器比没有校验器更糟，它会让人以为历史是可信的。
 - `internal/poker/visibility_test.go` 与 `internal/server/server_test.go` —— ADR-0006 的可见性不变量，
   分别在事件层面和真实 socket 投递路径上各守一道，含「弃牌者底牌永不公开」和
   「Sitting Out 的人看到的信息严格等于弃牌后旁观的在座玩家」。
