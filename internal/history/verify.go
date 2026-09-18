@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/xujnan/poker-cli/internal/poker"
+	"github.com/xujnan/poker-cli/internal/textui"
 )
 
 // Verify 用记录里的种子和动作把这一手牌原样重放一遍，确认结果对得上。
@@ -125,13 +126,18 @@ func actionOf(a poker.ActionRecord) (poker.Action, error) {
 	return poker.Action{}, fmt.Errorf("不认识的动作 %q", a.Action)
 }
 
+// sameCards 比两串牌。报错时按终端的样子印（A♠），不是按文件里的样子印（As）——
+// 这条消息是给人读的，而排查时是按手号和种子去找那一手，不会拿牌去 grep 文件。
 func sameCards(want, got []poker.Card) error {
+	mismatch := func() error {
+		return fmt.Errorf("记的是 %s，重放出来是 %s", textui.Cards(want), textui.Cards(got))
+	}
 	if len(want) != len(got) {
-		return fmt.Errorf("记的是 %v，重放出来是 %v", want, got)
+		return mismatch()
 	}
 	for i := range want {
 		if want[i] != got[i] {
-			return fmt.Errorf("记的是 %v，重放出来是 %v", want, got)
+			return mismatch()
 		}
 	}
 	return nil

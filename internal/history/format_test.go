@@ -126,3 +126,20 @@ func TestSummaryDoesNotCountTopUpsAsProfit(t *testing.T) {
 		}
 	}
 }
+
+// TestVerifyErrorsReadLikeTheScreen：校验失败的消息是给人读的，牌按终端的样子印。
+//
+// 它对照的确实是文件内容（文件里是 "As"），但排查时是按手号和种子去定位那一手，
+// 不会拿牌去 grep 文件——所以这里跟着屏幕走，而不是跟着文件走。
+func TestVerifyErrorsReadLikeTheScreen(t *testing.T) {
+	rec := playHand(t, 606, []int{200, 200}, 0, rand.New(rand.NewPCG(606, 1)))
+	rec.Seed++ // 种子一改，重放出来的底牌就对不上了
+
+	err := Verify(rec)
+	if err == nil {
+		t.Fatal("改了种子该报错")
+	}
+	if !strings.ContainsAny(err.Error(), "♠♥♦♣") {
+		t.Fatalf("报错里该用花色符号：%v", err)
+	}
+}
