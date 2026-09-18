@@ -19,9 +19,10 @@ import (
 )
 
 const usage = `用法：
-  poker serve [--blinds 1/2] [--seed N] [--hand-delay 3s] [--timeout 30s]  开一张牌桌，打印 Table Code
+  poker serve [--blinds 1/2] [--seed N] [--hand-delay 3s] [--hands N]  开一张牌桌，打印 Table Code
   poker join <CODE> --as <名字> [--buyin N] [--format ...]  以人的身份坐下
   poker bot  <CODE> --as <名字> [--buyin N] [--rebuy]       以机器人的身份坐下（独立进程，走与 agent 相同的接口）
+  poker history <历史文件> [--hand N] [--stats]              复盘手牌历史
   poker verify <历史文件>                                    重放手牌历史，确认每一手都还原得回去
 
 各子命令的 --help 里有完整参数。
@@ -43,6 +44,8 @@ func main() {
 		err = runJoin(os.Args[2:])
 	case "bot":
 		err = runBot(os.Args[2:])
+	case "history":
+		err = runHistory(os.Args[2:])
 	case "verify":
 		err = runVerify(os.Args[2:])
 	case "-h", "--help", "help":
@@ -64,6 +67,7 @@ func runServe(args []string) error {
 	buyin := fs.Int("buyin", 0, "默认带入，留空则取 100 个大盲")
 	seed := fs.Uint64("seed", 0, "洗牌随机种子，0 表示每次都不一样。给定同一个种子，牌序完全可复现")
 	handDelay := fs.Duration("hand-delay", 3*time.Second, "两手牌之间的间隔，自对弈时设 0")
+	hands := fs.Int("hands", 0, "打满多少手就收桌，0 表示一直打下去")
 	timeout := fs.Duration("timeout", 30*time.Second, "单次行动的时限，到点按「能过牌就过牌，否则弃牌」处理；设 0 表示不限时")
 	code := fs.String("code", "", "指定 Table Code，留空则随机生成")
 	dir := fs.String("dir", "", "socket 所在目录，留空取 ~/.poker")
@@ -94,6 +98,7 @@ func runServe(args []string) error {
 		Code:          *code,
 		Rand:          newRand(*seed),
 		HandDelay:     *handDelay,
+		MaxHands:      *hands,
 		ActionTimeout: *timeout,
 		Blinds:        blinds,
 		Buyin:         *buyin,
@@ -127,13 +132,26 @@ func runServe(args []string) error {
 	// 否则那个 Table Code 就再也开不了第二次。
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	closed := make(chan struct{})
 	go func() {
-		<-stop
-		fmt.Fprintln(os.Stderr, "收到退出信号，关闭牌桌。")
+		defer close(closed)
+		select {
+		case <-stop:
+			fmt.Fprintln(os.Stderr, "收到退出信号，关闭牌桌。")
+		case <-s.Finished():
+			fmt.Fprintf(os.Stderr, "打满 %d 手，关闭牌桌。\n", *hands)
+		}
 		_ = s.Close()
 	}()
 
-	return s.Serve()
+	err = s.Serve()
+	// 必须等 Close 真的做完才能返回。
+	//
+	// Serve 在监听器一关就返回了，而关监听器只是 Close 的第一步——
+	// 后面还有等 goroutine 退出、把手牌历史冲下盘。这里不等的话，进程会赶在
+	// 最后一手落盘之前退出，而那一手就这么没了，没有任何报错。
+	<-closed
+	return err
 }
 
 func runJoin(args []string) error {
@@ -183,6 +201,52 @@ func runBot(args []string) error {
 	defer s.Close()
 	// 机器人把看到的事件打到 stderr，stdout 留给将来可能的结构化输出。
 	return client.RunBot(s, os.Stderr, *rebuy)
+}
+
+// runHistory 把历史文件读成人能看的复盘。
+//
+// 跟 verify 是两种读法：verify 问的是「还原得回去吗」，这里问的是「当时发生了什么」。
+// 攒下来的历史没人读得懂的话，它就只是一堆占地方的 JSON。
+func runHistory(args []string) error {
+	if len(args) == 0 || args[0] == "" || args[0][0] == '-' {
+		return fmt.Errorf("用法：poker history <历史文件> [--hand N] [--stats]")
+	}
+	path := args[0]
+	fs := flag.NewFlagSet("history", flag.ExitOnError)
+	hand := fs.Int("hand", 0, "只看第几手，0 表示全部")
+	stats := fs.Bool("stats", false, "不逐手复盘，只打一张战绩表")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+
+	summary := history.NewSummary()
+	shown := 0
+	err := history.Scan(path, func(_ int, r history.Record) error {
+		if *stats {
+			summary.Add(r)
+			return nil
+		}
+		if *hand != 0 && r.Hand != *hand {
+			return nil
+		}
+		shown++
+		fmt.Println(history.Format(r))
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if *stats {
+		fmt.Print(summary)
+		return nil
+	}
+	if shown == 0 {
+		if *hand != 0 {
+			return fmt.Errorf("这个文件里没有第 %d 手", *hand)
+		}
+		fmt.Println("文件里一手牌都没有。")
+	}
+	return nil
 }
 
 // runVerify 把一个历史文件从头重放一遍，确认每手牌都还原得回去。

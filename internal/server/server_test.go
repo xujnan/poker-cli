@@ -623,6 +623,75 @@ func TestButtonRotates(t *testing.T) {
 	}
 }
 
+// TestMaxHandsStopsTheTable：打满 N 手就收桌，一手都不多打。
+//
+// 无人值守的评测要的是「跑 N 手然后停」。靠外面 kill 进程也能停，
+// 但那样停在哪一手是随机的，而随机停下的一批数据没法拿来比较两个 agent。
+func TestMaxHandsStopsTheTable(t *testing.T) {
+	const want = 3
+	tr, err := transport.NewUnix(t.TempDir())
+	if err != nil {
+		t.Fatalf("造不出传输: %v", err)
+	}
+	s, err := New(Options{
+		Transport: tr,
+		Rand:      rand.New(rand.NewPCG(20240918, 5)),
+		HandDelay: 5 * time.Millisecond,
+		MaxHands:  want,
+		Blinds:    poker.Blinds{Small: 1, Big: 2},
+		Buyin:     testBuyin,
+		Log:       io.Discard,
+	})
+	if err != nil {
+		t.Fatalf("开桌失败: %v", err)
+	}
+	go func() { _ = s.Serve() }()
+	t.Cleanup(func() { _ = s.Close() })
+
+	alice := dial(t, s, "alice")
+	aliceEvents := autoPlay(t, alice, want)
+	bob := dial(t, s, "bob")
+	autoPlay(t, bob, want)
+
+	select {
+	case <-s.Finished():
+	case <-time.After(10 * time.Second):
+		t.Fatal("等收桌超时")
+	}
+
+	events := waitEvents(t, aliceEvents)
+	if got := countOf(events, poker.EventHandStart); got != want {
+		t.Fatalf("该正好开 %d 手，得到 %d 手", want, got)
+	}
+
+	// 再等一会儿，确认它是真的停了，而不是慢了一拍。
+	extra := make(chan poker.Event, 8)
+	go func() {
+		for {
+			ev, _, err := alice.Next()
+			if err != nil {
+				close(extra)
+				return
+			}
+			extra <- ev
+		}
+	}()
+	deadline := time.After(300 * time.Millisecond)
+	for {
+		select {
+		case ev, ok := <-extra:
+			if !ok {
+				return
+			}
+			if ev.Type == poker.EventHandStart {
+				t.Fatal("收桌之后又开了一手")
+			}
+		case <-deadline:
+			return
+		}
+	}
+}
+
 // TestLoneJoinerGetsNoHand：一个人的牌桌不开牌（ADR-0014 说的是「凑够两个」）。
 func TestLoneJoinerGetsNoHand(t *testing.T) {
 	s := startTable(t, 10*time.Millisecond)

@@ -39,6 +39,9 @@ type Options struct {
 	Blinds poker.Blinds
 	// Buyin 是玩家没指定时的默认带入。
 	Buyin int
+	// MaxHands 是打满多少手就收桌，0 表示一直打下去。
+	// 无人值守的 agent 评测要的是「跑 N 手然后停」，不是「跑到有人来杀进程」。
+	MaxHands int
 	// ActionTimeout 是单个玩家一次行动的时限，到点按「能 check 就 check，否则 fold」
 	// 处理（ADR-0011 里那条行动超时规则）。设 0 表示不限时。
 	ActionTimeout time.Duration
@@ -76,7 +79,12 @@ type Server struct {
 	timeout   time.Duration
 	blinds    poker.Blinds
 	buyin     int
+	maxHands  int
 	log       *log.Logger
+
+	// finished 在打满 MaxHands 手之后关闭。
+	finished   chan struct{}
+	finishOnce sync.Once
 
 	reqs chan request
 	done chan struct{}
@@ -125,9 +133,11 @@ func New(opts Options) (*Server, error) {
 		timeout:   opts.ActionTimeout,
 		blinds:    opts.Blinds,
 		buyin:     opts.Buyin,
+		maxHands:  opts.MaxHands,
 		log:       log.New(logOut, "", log.LstdFlags),
 		reqs:      make(chan request, 64),
 		done:      make(chan struct{}),
+		finished:  make(chan struct{}),
 		conns:     make(map[*conn]struct{}),
 	}
 
@@ -168,6 +178,12 @@ func (s *Server) Transport() transport.Transport { return s.tr }
 
 // Blinds 返回这张桌的盲注。
 func (s *Server) Blinds() poker.Blinds { return s.blinds }
+
+// Finished 在打满 MaxHands 手之后关闭；没设 MaxHands 时永远不会关。
+//
+// 它不自己调 Close：牌桌 goroutine 关自己会死锁在 Close 的 Wait 上。
+// 由调用方收到信号之后决定什么时候收。
+func (s *Server) Finished() <-chan struct{} { return s.finished }
 
 // handMeta 是当前这手牌开局时的样子。牌打完之后座位上的筹码已经变了，
 // 写历史要的是「开局前」那一份，所以得在发牌之前先留一份底。
@@ -342,7 +358,7 @@ func (s *Server) tableLoop() {
 	}
 	// 凑够两个有筹码的人就自动开下一手，不设准备确认（ADR-0014）。
 	armHand := func() {
-		if s.hand != nil || len(s.activeSeats()) < 2 {
+		if s.hand != nil || len(s.activeSeats()) < 2 || s.handsDone() {
 			disarmHand()
 			return
 		}
@@ -393,7 +409,7 @@ func (s *Server) tableLoop() {
 			arm()
 		case <-handFire:
 			handTimer, handFire = nil, nil
-			if s.hand == nil && len(s.activeSeats()) >= 2 {
+			if s.hand == nil && len(s.activeSeats()) >= 2 && !s.handsDone() {
 				s.startHand()
 			}
 			arm()
@@ -602,6 +618,16 @@ func (s *Server) settleHand() {
 
 	// 这里正是「两手牌之间」，攒着的补码在此刻落地（ADR-0015）。
 	s.applyPendingTopUps()
+
+	if s.handsDone() {
+		s.log.Printf("打满 %d 手，收桌", s.maxHands)
+		s.finishOnce.Do(func() { close(s.finished) })
+	}
+}
+
+// handsDone 判断是不是已经打满了 MaxHands 手。
+func (s *Server) handsDone() bool {
+	return s.maxHands > 0 && s.handNo >= s.maxHands
 }
 
 // --- 座位类命令 ---

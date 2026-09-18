@@ -38,6 +38,9 @@ go build -o poker ./cmd/poker
 
 ## 给 agent 用
 
+完整的接入说明在 **[docs/agent.md](docs/agent.md)**：事件表、命令表、错误码表，
+以及一个 20 行、不依赖任何库、真能和 `poker bot` 对打的 Python agent。
+
 加 `--format=jsonl`，每行一个事件对象，阻塞读一行即可事件驱动：
 
 ```sh
@@ -60,6 +63,9 @@ go build -o poker ./cmd/poker
 
 `--seed` 给定时牌序完全可复现（ADR-0004）——前提是座位顺序也一样，因为发牌是按座位轮着发的。
 
+跑评测时用 `--hands N`：打满就自动收桌。靠外面杀进程也能停，但停在哪一手是随机的，
+而随机停下的一批数据没法拿来比较两个 agent。
+
 ## 手牌历史
 
 每手牌结束时，一条含**随机种子、全部底牌与每个动作**的完整记录会追加写进
@@ -79,6 +85,38 @@ $ poker verify ~/.poker/history/TABLEC-20260918-120358.jsonl
 ✗ 第 2 行（第 2 手，种子 13105718115652666056）：按种子重放，bot3 的底牌对不上：记的是 [Jd Qd]，重放出来是 [4d Ad]
 ```
 
+`poker history` 是给人看的那一半——复盘某一手，或者拉一张战绩表：
+
+```console
+$ poker history ~/.poker/history/TABLEF-*.jsonl --hand 3
+── 第 3 手 ──  TABLEF  2026-09-18 16:36:33  盲注 1/2  庄家 bot1
+   种子 10163542570009745121
+   筹码  bot1 200 | bot2 200
+   底牌  bot1 Qc Tc | bot2 Js 3d
+
+   翻牌前
+     bot1       跟注 1
+     bot2       过牌
+
+   翻牌  Qd As 5s
+     bot2       过牌
+     bot1       过牌
+   ...
+   摊牌
+     bot1 Qc Tc → 两对（As Qc Qd 5s 5c）
+     bot2 Js 3d → 一对（As Qd Js 5s 5c）
+
+   底池 12 → bot1
+   结束  bot1 206 (+6) | bot2 194 (-6)
+
+$ poker history ~/.poker/history/TABLEF-*.jsonl --stats
+共 19 手牌
+
+玩家                 手数      赢      净筹码
+bot1               19     10       +3
+bot2               19      9       -3
+```
+
 历史是上帝视角的（所有人的底牌都在里面），跟发给玩家的事件流不是一回事——
 ADR-0006 那套可见性规矩管的是事件，不是这个文件。别把记录当事件发出去。
 
@@ -93,7 +131,8 @@ ADR-0006 那套可见性规矩管的是事件，不是这个文件。别把记�
 - Stack、Buy-in、Top-up（补码），输光自动进入 Sitting Out，补了码就回来
 - 手动 `sitout` / `sitin`；`--rebuy` 让无人值守的牌桌一直打下去
 - 断线接管与行动超时：没人能靠装死或拔网线冻住整张牌桌
-- Hand History 只追加落盘，每手一个自足的种子，`poker verify` 能把它们逐手重放回去
+- Hand History 只追加落盘，每手一个自足的种子，`poker verify` 逐手重放校验，`poker history` 复盘与战绩
+- `--hands N` 打满收桌，评测跑完自己停
 
 还没有的：跨机联机（传输已经在接口后面了，加 TCP 时不用动牌局逻辑）。
 
@@ -137,6 +176,8 @@ go test -race ./...
   规则上完全合法，但一手牌要走上百个动作。
 - `internal/server/topup_test.go` —— 补码只在两手牌之间落地（这条能直接从事件流上看出来：
   一条到账的 `top_up` 绝不该夹在 `hand_start` 和 `hand_end` 中间），以及破产→补码→牌桌接着跑。
+- `cmd/poker/main_test.go` —— 编译出真二进制、起真进程跑一遍。它测的是别处结构上看不到的东西：
+  进程什么时候退出、退出之前有没有把事情做完。「最后一手的历史没落盘」那个 bug 就活在这里。
 - `internal/transport/transport_test.go` —— 同一套断言跑在每个传输实现上，分清哪些是「传输的约定」、
   哪些只是「Unix socket 恰好如此」。
 - `internal/history/history_test.go` 与 `internal/server/history_test.go` —— 记下来的东西必须真的还原得回去：
