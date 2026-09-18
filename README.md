@@ -85,6 +85,9 @@ $ poker verify ~/.poker/history/TABLEC-20260918-120358.jsonl
 ✗ 第 2 行（第 2 手，种子 13105718115652666056）：按种子重放，bot3 的底牌对不上：记的是 [Jd Qd]，重放出来是 [4d Ad]
 ```
 
+上色只在对面确实是终端时才开——管道、重定向、`NO_COLOR=1` 一律输出干净文本，
+免得转录和日志里混进转义序列。
+
 `poker history` 是给人看的那一半——复盘某一手，或者拉一张战绩表：
 
 ```console
@@ -141,7 +144,7 @@ cmd/poker/         子命令入口
 internal/poker/    牌局纯核心：牌、牌堆、牌力、底池、一手牌的状态机、事件
 internal/protocol/ 客户端与服务端之间的 wire 格式（说什么）
 internal/transport/ 怎么连上一张牌桌（怎么连）：接口 + 同机实现 + 内存实现
-internal/textui/   在终端上长什么样：花色符号、按显示列宽对齐
+internal/textui/   在终端上长什么样：花色符号、红黑配色、按显示列宽对齐
 internal/history/  手牌历史：记录、只追加落盘、重放校验
 internal/server/   牌桌（一个进程一张桌）
 internal/client/   人类客户端与机器人客户端
@@ -151,7 +154,7 @@ internal/client/   人类客户端与机器人客户端
 这条约束是 `--seed` 可复现测试与可见性测试共同的前提，是整个项目里最容易被悄悄侵蚀的一条。
 一手牌是一个纯状态机：`NewHand` 起局，`Apply(玩家, 动作)` 推进，每次推进返回该发出去的事件。
 
-牌在屏幕上是 `A♠`，在线路和历史文件里是 `"As"`，两者不是一个东西：前者归 `internal/textui`，
+牌在屏幕上是 `A♠`（红桃方块在终端里标红），在线路和历史文件里是 `"As"`，两者不是一个东西：前者归 `internal/textui`，
 后者是 `poker.Card.String()`。混成一个的话，改一次显示就会把 JSONL 的 wire 格式和
 已经存下的手牌历史一起改掉——照着 docs/agent.md 写的 agent 会当场解析失败，
 旧历史文件也再也 verify 不过，而这两样都不会有编译错误。

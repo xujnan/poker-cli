@@ -15,6 +15,7 @@ import (
 	"github.com/xujnan/poker-cli/internal/history"
 	"github.com/xujnan/poker-cli/internal/poker"
 	"github.com/xujnan/poker-cli/internal/server"
+	"github.com/xujnan/poker-cli/internal/textui"
 	"github.com/xujnan/poker-cli/internal/transport"
 )
 
@@ -172,6 +173,7 @@ func runJoin(args []string) error {
 		return fmt.Errorf("--format 只能是 %s 或 %s", client.FormatText, client.FormatJSONL)
 	}
 
+	textui.UseColor(os.Stdout)
 	s, err := dialTable(*dir, code, *name, *buyin)
 	if err != nil {
 		return err
@@ -194,12 +196,13 @@ func runBot(args []string) error {
 		return fmt.Errorf("必须用 --as 指定名字")
 	}
 
+	// 机器人的事件打在 stderr 上，上不上色就看那一头是不是终端。
+	textui.UseColor(os.Stderr)
 	s, err := dialTable(*dir, code, *name, *buyin)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
-	// 机器人把看到的事件打到 stderr，stdout 留给将来可能的结构化输出。
 	return client.RunBot(s, os.Stderr, *rebuy)
 }
 
@@ -211,6 +214,7 @@ func runHistory(args []string) error {
 	if len(args) == 0 || args[0] == "" || args[0][0] == '-' {
 		return fmt.Errorf("用法：poker history <历史文件> [--hand N] [--stats]")
 	}
+	textui.UseColor(os.Stdout)
 	path := args[0]
 	fs := flag.NewFlagSet("history", flag.ExitOnError)
 	hand := fs.Int("hand", 0, "只看第几手，0 表示全部")
@@ -258,6 +262,7 @@ func runVerify(args []string) error {
 	if len(args) == 0 || args[0] == "" || args[0][0] == '-' {
 		return fmt.Errorf("用法：poker verify <历史文件>")
 	}
+	textui.UseColor(os.Stdout)
 	path := args[0]
 
 	var checked, bad int

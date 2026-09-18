@@ -2,6 +2,7 @@ package textui
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
@@ -117,4 +118,107 @@ func TestPadLeftRightAligns(t *testing.T) {
 	if got := PadLeft("净筹码", 8); Width(got) != 8 || !strings.HasSuffix(got, "净筹码") {
 		t.Fatalf("得到 %q（%d 列）", got, Width(got))
 	}
+}
+
+// withColor 临时打开彩色，跑完还原——别的测试默认是不上色的。
+func withColor(t *testing.T) {
+	t.Helper()
+	colorOn.Store(true)
+	t.Cleanup(func() { colorOn.Store(false) })
+}
+
+// TestColorIsOffByDefault：默认不上色。
+//
+// 这条是给管道兜底的：转录、重定向出来的日志、测试的断言里都不该混进转义序列，
+// 而它们走的正是默认这条路。
+func TestColorIsOffByDefault(t *testing.T) {
+	if colorOn.Load() {
+		t.Fatal("彩色默认该是关的")
+	}
+	if got := Card(mustCard(t, "Ah")); got != "A♥" {
+		t.Fatalf("不上色时该是干净的，得到 %q", got)
+	}
+}
+
+// TestRedForHeartsAndDiamonds：只有红桃方块上色，黑桃梅花保持默认前景色。
+//
+// 不给黑桃梅花写黑色是故意的——深色背景下黑字等于隐身。
+func TestRedForHeartsAndDiamonds(t *testing.T) {
+	withColor(t)
+	for _, c := range []string{"Ah", "Td"} {
+		got := Card(mustCard(t, c))
+		if !strings.HasPrefix(got, red) || !strings.HasSuffix(got, reset) {
+			t.Fatalf("%s 该标红，得到 %q", c, got)
+		}
+	}
+	for _, c := range []string{"As", "Tc"} {
+		got := Card(mustCard(t, c))
+		if strings.Contains(got, "\033[") {
+			t.Fatalf("%s 不该带颜色，得到 %q", c, got)
+		}
+	}
+}
+
+// TestWidthIgnoresEscapes：转义序列一列都不占。
+//
+// 算进去的话，上了色的那一行会被当成更宽，于是补空格补少了，表格就歪了。
+func TestWidthIgnoresEscapes(t *testing.T) {
+	withColor(t)
+	colored := Card(mustCard(t, "Ah"))
+	if len(colored) <= 2 {
+		t.Fatalf("这一版该是带转义的，得到 %q", colored)
+	}
+	if got := Width(colored); got != 2 {
+		t.Fatalf("A♥ 该占 2 列，得到 %d（%q）", got, colored)
+	}
+	// 补齐之后的可见宽度也得对。
+	if got := Width(Pad(colored, 10)); got != 10 {
+		t.Fatalf("补到 10 列，得到 %d", got)
+	}
+}
+
+// TestUseColorStaysOffForPipes：对面不是终端就别上色。
+func TestUseColorStaysOffForPipes(t *testing.T) {
+	t.Cleanup(func() { colorOn.Store(false) })
+
+	var buf strings.Builder
+	UseColor(&buf) // 不是 *os.File
+	if colorOn.Load() {
+		t.Fatal("写进 buffer 也上色了")
+	}
+
+	f, err := os.CreateTemp(t.TempDir(), "out")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	UseColor(f) // 是 *os.File，但是普通文件
+	if colorOn.Load() {
+		t.Fatal("写进文件也上色了")
+	}
+}
+
+// TestNoColorEnvIsHonored：NO_COLOR 说了不算数就是不算数（https://no-color.org）。
+func TestNoColorEnvIsHonored(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	t.Cleanup(func() { colorOn.Store(false) })
+	// 拿一个字符设备来试，没有 NO_COLOR 的话它是会上色的。
+	dev, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Skip("打不开 /dev/null")
+	}
+	defer dev.Close()
+	UseColor(dev)
+	if colorOn.Load() {
+		t.Fatal("设了 NO_COLOR 还上色")
+	}
+}
+
+func mustCard(t *testing.T, s string) poker.Card {
+	t.Helper()
+	c, err := poker.ParseCard(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }

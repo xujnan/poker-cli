@@ -11,7 +11,11 @@
 package textui
 
 import (
+	"io"
+	"os"
 	"strings"
+	"sync/atomic"
+	"unicode/utf8"
 
 	"github.com/xujnan/poker-cli/internal/poker"
 )
@@ -22,9 +26,47 @@ import (
 // 于是一张对齐好的牌桌换个终端就散了。文本形态是单宽，等宽字体基本都有。
 var suitSymbols = [4]string{"♠", "♥", "♦", "♣"}
 
+const (
+	red   = "\033[31m"
+	reset = "\033[0m"
+)
+
+// colorOn 决定要不要上色。默认关着，只有 UseColor 在确认对面是终端之后才打开。
+//
+// 进程级的开关不好看，但上色本来就是进程级的终端属性，而替代方案是把一个样式参数
+// 一路穿过 Render / Format / 每个辅助函数——为一个显示开关改十几个签名不划算。
+// 用原子量是图个省心：这样「启动时设一次、之后只读」这条约定万一被破坏，也不会是数据竞争。
+var colorOn atomic.Bool
+
+// UseColor 在 w 确实是终端时打开彩色。只在进程启动时调一次。
+//
+// 管道和文件里一律不上色：转录、测试、重定向出来的日志都不该混进转义序列。
+// 也认 NO_COLOR（https://no-color.org）和 TERM=dumb。
+func UseColor(w io.Writer) {
+	if os.Getenv("NO_COLOR") != "" || os.Getenv("TERM") == "dumb" {
+		return
+	}
+	f, ok := w.(*os.File)
+	if !ok {
+		return
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return
+	}
+	colorOn.Store(info.Mode()&os.ModeCharDevice != 0)
+}
+
 // Card 是一张牌在终端上的样子，例如 A♠。
+//
+// 开了彩色的话，红桃和方块整张牌标红——这是读牌时真正用得上的那个区分。
+// 黑桃梅花保持终端默认前景色，不写成黑色：深色背景下黑字等于隐身。
 func Card(c poker.Card) string {
-	return c.Rank.String() + suitSymbols[c.Suit]
+	s := c.Rank.String() + suitSymbols[c.Suit]
+	if colorOn.Load() && (c.Suit == poker.Hearts || c.Suit == poker.Diamonds) {
+		return red + s + reset
+	}
+	return s
 }
 
 // Cards 把一串牌排成一行。空的时候给一个短横，免得那一栏看起来像漏了。
@@ -48,14 +90,34 @@ func Cards(cs []poker.Card) string {
 // 所以这里也按一列算——这正是不用 emoji 形态的原因。
 func Width(s string) int {
 	w := 0
-	for _, r := range s {
+	for i := 0; i < len(s); {
+		// 跳过 ANSI 转义序列：它一列都不占，算进去的话上了色的那行就会短一截。
+		if n := escapeLen(s[i:]); n > 0 {
+			i += n
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
 		if isWide(r) {
 			w += 2
 		} else {
 			w++
 		}
+		i += size
 	}
 	return w
+}
+
+// escapeLen 返回开头那个 ANSI 转义序列的长度，开头不是转义序列则返回 0。
+func escapeLen(s string) int {
+	if !strings.HasPrefix(s, "\033[") {
+		return 0
+	}
+	for i := 2; i < len(s); i++ {
+		if s[i] >= '@' && s[i] <= '~' {
+			return i + 1
+		}
+	}
+	return 0
 }
 
 func isWide(r rune) bool {
