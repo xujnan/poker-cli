@@ -18,12 +18,6 @@ import (
 	"github.com/xujnan/poker-cli/internal/transport"
 )
 
-// 输出格式（ADR-0002）。
-const (
-	FormatText  = "text"
-	FormatJSONL = "jsonl"
-)
-
 // Session 是一条到牌桌的连接。
 type Session struct {
 	conn   net.Conn
@@ -62,89 +56,133 @@ func (s *Session) Close() error { return s.conn.Close() }
 
 // Play 跑人类客户端：把事件渲染出来，同时从 in 读命令。
 //
-// in 为 nil 时只看不玩。format 决定渲染方式，两种格式读的是同一份事件（ADR-0002）。
+// in 为 nil 时只看不玩。format 决定渲染方式，三种格式读的是同一份事件（ADR-0002）。
 // rebuy 为真时，输光了就自动补回最初的带入。
-func Play(s *Session, format string, out io.Writer, in io.Reader, rebuy bool) error {
-	if in != nil {
-		go readCommands(s, in, out)
-	}
-	buy := rebuyer{name: s.Name(), enabled: rebuy}
-	for {
-		ev, raw, err := s.Next()
-		if err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
-				if format == FormatText {
-					fmt.Fprintln(out, "与牌桌的连接已断开。")
-				}
-				return nil
-			}
-			return err
-		}
-		if cmd, ok := buy.observe(ev); ok {
-			if err := s.Send(cmd); err != nil {
-				return err
-			}
-		}
-		if format == FormatJSONL {
-			// 原样直通：不解码再编码，服务端说的话一个字节都不改（agent 拿到的必须是事实本身）。
-			if _, err := out.Write(append(raw, '\n')); err != nil {
-				return err
-			}
-			continue
-		}
-		if line := Render(ev); line != "" {
-			fmt.Fprintln(out, line)
-		}
-	}
-}
-
-// readCommands 从标准输入读命令。
 //
-// 这里仍然是最朴素的一行一读。等到「事件在刷屏、你正在输一半 bet」真的难受起来时，
-// 再上擦除重绘那一套——在那之前引一个 readline 依赖是提前付账。
-func readCommands(s *Session, in io.Reader, out io.Writer) {
-	sc := bufio.NewScanner(in)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		switch line {
-		case "":
-			continue
-		case "quit", "exit":
-			_ = s.Send(protocol.Command{Type: protocol.CmdQuit})
-			_ = s.Close()
-			return
-		case "help":
-			fmt.Fprintln(out, helpText)
-			continue
-		case "sitout":
-			send(s, out, protocol.Command{Type: protocol.CmdSitOut})
-			continue
-		case "sitin":
-			send(s, out, protocol.Command{Type: protocol.CmdSitIn})
-			continue
+// 事件和用户输入在这里汇成一个 select 循环，两边各有一个 goroutine 只负责「读」。
+// 呈现全都发生在这条主循环上，一次一件——重画那一版非得如此不可：它要数自己上一帧
+// 有多少行才能把光标挪回去，而并发的两路输出会把这个数搅乱，屏幕上就会留下残渣。
+func Play(s *Session, format string, out io.Writer, in io.Reader, rebuy bool) error {
+	v := newView(format, out, s.Name())
+	done := make(chan struct{})
+	defer close(done)
+
+	events := make(chan eventMsg, 8)
+	go func() {
+		for {
+			ev, raw, err := s.Next()
+			select {
+			case events <- eventMsg{ev: ev, raw: raw, err: err}:
+			case <-done:
+				return
+			}
+			if err != nil {
+				return
+			}
 		}
-		if rest, ok := strings.CutPrefix(line, "topup"); ok {
-			amount, err := strconv.Atoi(strings.TrimSpace(rest))
-			if err != nil || amount <= 0 {
-				fmt.Fprintln(out, "topup 要跟一个正数额，比如 topup 200")
+	}()
+
+	var lines chan string
+	if in != nil {
+		lines = make(chan string)
+		go func() {
+			sc := bufio.NewScanner(in)
+			for sc.Scan() {
+				select {
+				case lines <- sc.Text():
+				case <-done:
+					return
+				}
+			}
+			// 标准输入关了（比如管道结束），但牌桌可能还在打，继续看着就行。
+			close(lines)
+		}()
+	}
+
+	buy := rebuyer{name: s.Name(), enabled: rebuy}
+	v.start()
+	for {
+		select {
+		case m := <-events:
+			if m.err != nil {
+				if errors.Is(m.err, io.EOF) || errors.Is(m.err, net.ErrClosed) {
+					v.disconnected()
+					return nil
+				}
+				return m.err
+			}
+			if cmd, ok := buy.observe(m.ev); ok {
+				if err := s.Send(cmd); err != nil {
+					return err
+				}
+			}
+			if err := v.event(m.ev, m.raw); err != nil {
+				return err
+			}
+		case line, ok := <-lines:
+			if !ok {
+				// 置 nil 之后这条 case 就永远不会被选中了。
+				lines = nil
 				continue
 			}
-			send(s, out, protocol.Command{Type: protocol.CmdTopUp, Amount: amount})
-			continue
+			// 终端已经把这一行连同换行一起回显出来了，重画那一版得知道这件事。
+			v.typed()
+			handleLine(s, v, line)
+			v.refresh()
 		}
-		action, err := poker.ParseAction(line)
-		if err != nil {
-			fmt.Fprintf(out, "%v\n", err)
-			continue
-		}
-		send(s, out, protocol.CommandOf(action))
 	}
-	// 标准输入关了（比如管道结束），但牌桌可能还在打，继续看着就行。
 }
 
-func send(s *Session, out io.Writer, cmd protocol.Command) {
+// eventMsg 是读事件那个 goroutine 送回主循环的一条消息，err 非空表示流到头了。
+type eventMsg struct {
+	ev  poker.Event
+	raw []byte
+	err error
+}
+
+// handleLine 处理用户敲的一行。
+//
+// quit 不在这里返回：它发完命令就把连接关掉，剩下的交给事件那一路——读到
+// net.ErrClosed，走和对面挂掉完全一样的收尾。两条退出路径合成一条，少一处能分岔的地方。
+func handleLine(s *Session, v view, line string) {
+	line = strings.TrimSpace(line)
+	switch line {
+	case "":
+		return
+	case "quit", "exit":
+		_ = s.Send(protocol.Command{Type: protocol.CmdQuit})
+		_ = s.Close()
+		return
+	case "help":
+		v.notice(helpText)
+		return
+	case "sitout":
+		send(s, v, protocol.Command{Type: protocol.CmdSitOut})
+		return
+	case "sitin":
+		send(s, v, protocol.Command{Type: protocol.CmdSitIn})
+		return
+	}
+	if rest, ok := strings.CutPrefix(line, "topup"); ok {
+		amount, err := strconv.Atoi(strings.TrimSpace(rest))
+		if err != nil || amount <= 0 {
+			v.notice("topup 要跟一个正数额，比如 topup 200")
+			return
+		}
+		send(s, v, protocol.Command{Type: protocol.CmdTopUp, Amount: amount})
+		return
+	}
+	action, err := poker.ParseAction(line)
+	if err != nil {
+		v.notice(err.Error())
+		return
+	}
+	send(s, v, protocol.CommandOf(action))
+}
+
+func send(s *Session, v view, cmd protocol.Command) {
 	if err := s.Send(cmd); err != nil {
-		fmt.Fprintf(out, "发不出去：%v\n", err)
+		v.notice(fmt.Sprintf("发不出去：%v", err))
 	}
 }
 

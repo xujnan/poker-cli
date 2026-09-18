@@ -160,7 +160,8 @@ func runJoin(args []string) error {
 	name := fs.String("as", "", "你在牌桌上的名字（必填）")
 	buyin := fs.Int("buyin", 0, "带入多少筹码，留空则用牌桌的默认值")
 	rebuy := fs.Bool("rebuy", false, "输光之后自动补码回最初的带入")
-	format := fs.String("format", client.FormatText, "输出格式：text 给人看，jsonl 给 agent 看")
+	format := fs.String("format", client.FormatAuto,
+		"输出格式：live 只显示正在打的这一手（就地重画），text 一行一条往下滚，jsonl 给 agent，auto 看是不是终端")
 	dir := fs.String("dir", "", "socket 所在目录，留空取 ~/.poker")
 	code, err := parseCodeAndFlags(fs, args, "join")
 	if err != nil {
@@ -169,8 +170,11 @@ func runJoin(args []string) error {
 	if *name == "" {
 		return fmt.Errorf("必须用 --as 指定名字")
 	}
-	if *format != client.FormatText && *format != client.FormatJSONL {
-		return fmt.Errorf("--format 只能是 %s 或 %s", client.FormatText, client.FormatJSONL)
+	switch *format {
+	case client.FormatAuto, client.FormatLive, client.FormatText, client.FormatJSONL:
+	default:
+		return fmt.Errorf("--format 只能是 %s、%s、%s 或 %s",
+			client.FormatAuto, client.FormatLive, client.FormatText, client.FormatJSONL)
 	}
 
 	textui.UseColor(os.Stdout)
@@ -179,7 +183,7 @@ func runJoin(args []string) error {
 		return err
 	}
 	defer s.Close()
-	return client.Play(s, *format, os.Stdout, os.Stdin, *rebuy)
+	return client.Play(s, client.ResolveFormat(*format, os.Stdout), os.Stdout, os.Stdin, *rebuy)
 }
 
 func runBot(args []string) error {

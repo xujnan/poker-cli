@@ -38,6 +38,22 @@ const (
 // 用原子量是图个省心：这样「启动时设一次、之后只读」这条约定万一被破坏，也不会是数据竞争。
 var colorOn atomic.Bool
 
+// IsTerminal 判断 w 那一头是不是终端。
+//
+// 凡是「只有终端才做得了」的事都该先问它一句：上色、就地重画光标。管道、重定向、
+// 测试里的 buffer 一律返回 false——往那些地方写转义序列，出来的就是一堆乱码。
+func IsTerminal(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
 // UseColor 在 w 确实是终端时打开彩色。只在进程启动时调一次。
 //
 // 管道和文件里一律不上色：转录、测试、重定向出来的日志都不该混进转义序列。
@@ -46,15 +62,7 @@ func UseColor(w io.Writer) {
 	if os.Getenv("NO_COLOR") != "" || os.Getenv("TERM") == "dumb" {
 		return
 	}
-	f, ok := w.(*os.File)
-	if !ok {
-		return
-	}
-	info, err := f.Stat()
-	if err != nil {
-		return
-	}
-	colorOn.Store(info.Mode()&os.ModeCharDevice != 0)
+	colorOn.Store(IsTerminal(w))
 }
 
 // Card 是一张牌在终端上的样子，例如 A♠。
