@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"io"
 	"math/rand/v2"
 	"testing"
@@ -819,4 +820,26 @@ func TestTinyBuyinIsRejected(t *testing.T) {
 	}
 	defer sess.Close()
 	waitForError(t, sess, "buyin_too_small")
+}
+
+// TestTableIsCapped：坐满就不让再进了。
+//
+// 没有上限的话，人多到一定程度就发不出牌——一副 52 张，n 个人要 2n+5 张，
+// 到 24 人牌堆见底，而那是一次牌桌 goroutine 里的 panic，整个服务端跟着走。
+// 上限定在 9 是标准全环桌，位置命名那套惯例也正是按它定的。
+func TestTableIsCapped(t *testing.T) {
+	s := startTable(t, time.Hour) // 别开局，这个测试只关心能不能坐下
+
+	for i := 0; i < poker.MaxSeats; i++ {
+		sess := dial(t, s, fmt.Sprintf("p%d", i))
+		if _, _, err := sess.Next(); err != nil {
+			t.Fatalf("第 %d 个人没坐下: %v", i+1, err)
+		}
+	}
+	extra, err := client.Dial(s.Transport(), s.Code(), "挤一挤", 0)
+	if err != nil {
+		t.Fatalf("连接失败: %v", err)
+	}
+	defer extra.Close()
+	waitForError(t, extra, "table_full")
 }

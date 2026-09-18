@@ -461,6 +461,16 @@ func (s *Server) handleJoin(c *conn, cmd protocol.Command) {
 		return
 	}
 
+	if len(s.seats) >= poker.MaxSeats {
+		c.send(poker.Event{
+			Type: poker.EventError, Code: "table_full",
+			Message: fmt.Sprintf("这张桌已经坐满 %d 个人了", poker.MaxSeats),
+			Max:     poker.MaxSeats,
+		})
+		c.shutdown()
+		return
+	}
+
 	buyin := cmd.Buyin
 	if buyin == 0 {
 		buyin = s.buyin

@@ -77,8 +77,8 @@ for line in conn:
    "to_call":0,
    "stack":197,
    "seats":[
-     {"player":"bot2","stack":199,"committed":2,"total":2},
-     {"player":"agent1","stack":197,"committed":2,"total":2}],
+     {"player":"bot2","position":"BTN/SB","stack":199,"committed":2,"total":2},
+     {"player":"agent1","position":"BB","stack":197,"committed":2,"total":2}],
    "legal":[
      {"action":"fold"},
      {"action":"check"},
@@ -93,8 +93,21 @@ for line in conn:
 | `pot` | 当前底池总额 |
 | `to_call` | 你还要投多少才跟得上，0 表示可以过牌 |
 | `stack` | 你手上还剩多少 |
-| `seats` | 各家状态，顺序就是座位顺序。`committed` 是本轮投入，`total` 是本手总投入，另有 `folded` / `allin` / `sitting_out` |
+| `seats` | 各家状态，顺序就是座位顺序。`position` 是位置（见下），`committed` 是本轮投入，`total` 是本手总投入，另有 `folded` / `allin` / `sitting_out` |
 | `legal` | **此刻真正能做的动作**。`call` / `allin` 带 `amount`（要投多少），`bet` 带 `min` / `max`（本轮总投入能推到的上下限） |
+
+`seats[].position` 是位置标注，只在牌局进行中有值：
+
+```
+BTN  庄家位，这条街最后说话
+SB   小盲     BB  大盲
+UTG  第一个说话（under the gun），人多时后面还有 UTG+1、UTG+2
+LJ   HJ   CO  从 BTN 往右数回来的三个位置，CO 紧挨着 BTN
+```
+
+位置是德州扑克里最重要的那个变量——同样两张牌，在 BTN 和在 UTG 是两手完全不同的牌。
+它能从庄家位和人数算出来，但那要照着一张各家略有出入的惯例表来，所以服务端算好给你，
+免得每个 agent 各实现一遍还实现得不一样。一张桌最多 9 个人。
 
 **照着 `legal` 挑就不会错。** 它不会撒谎——里面给的动作做下去一定被接受，这条有测试守着。它也已经替你算好了最小加注额、推光要多少、此刻能不能过牌，这些都不需要你自己推导。
 
@@ -164,6 +177,7 @@ hand_start → blind × 2 → hole_cards → [your_turn ⇄ action]…
 | `hand_over` / `no_hand` / `not_in_hand` | 现在没有你能行动的牌局 |
 | `name_taken` / `bad_name` / `buyin_too_small` | 加入牌桌被拒 |
 | `stack_at_max` / `topup_too_big` | 补码被拒，`max` 是还能补多少 |
+| `table_full` | 桌子坐满了（最多 9 人） |
 | `unknown_command` / `bad_action` / `bad_amount` | 命令本身有问题 |
 
 **最省事的做法是永远不碰这张表**：只从 `legal` 里挑动作，你就一条错误都收不到。

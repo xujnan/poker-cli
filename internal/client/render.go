@@ -45,7 +45,7 @@ func Render(ev poker.Event) string {
 		return fmt.Sprintf("你的底牌：%s", cards(ev.Cards))
 
 	case poker.EventYourTurn:
-		return renderTurn(ev.Snapshot)
+		return renderTurn(ev.Player, ev.Snapshot)
 	case poker.EventAction:
 		return renderAction(ev)
 	case poker.EventStreet:
@@ -81,12 +81,20 @@ func Render(ev poker.Event) string {
 }
 
 // renderTurn 是人类玩家最需要看清楚的一屏：牌、池、要跟多少、能做什么。
-func renderTurn(snap *poker.Snapshot) string {
+func renderTurn(me string, snap *poker.Snapshot) string {
 	if snap == nil {
 		return "轮到你了"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n轮到你了（%s）\n", streetName(snap.Street))
+	// 位置跟街名并排放在最显眼的地方：同样两张牌，在 BTN 和在 UTG 是两手完全不同的牌。
+	where := streetName(snap.Street)
+	for _, s := range snap.Seats {
+		if s.Player == me && s.Position != "" {
+			where += "，" + s.Position
+			break
+		}
+	}
+	fmt.Fprintf(&b, "\n轮到你了（%s）\n", where)
 	fmt.Fprintf(&b, "  底牌 %s", cards(snap.Hole))
 	if len(snap.Community) > 0 {
 		fmt.Fprintf(&b, "   公共牌 %s", cards(snap.Community))
@@ -184,7 +192,12 @@ func seatLine(seats []poker.SeatView) string {
 		case s.SittingOut:
 			tag = " 暂离"
 		}
-		parts = append(parts, fmt.Sprintf("%s %d%s", s.Player, s.Stack, tag))
+		// 位置只在牌局进行中有值：两手牌之间没有庄家位，也就没有位置可言。
+		pos := ""
+		if s.Position != "" {
+			pos = " " + s.Position
+		}
+		parts = append(parts, fmt.Sprintf("%s%s %d%s", s.Player, pos, s.Stack, tag))
 	}
 	return strings.Join(parts, " | ")
 }

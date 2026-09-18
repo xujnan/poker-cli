@@ -26,10 +26,28 @@ func Format(r Record) string {
 	fmt.Fprintf(&b, "── 第 %d 手 ──  %s  %s  盲注 %s  庄家 %s\n", r.Hand, r.Table, when, r.Blinds, r.Button)
 	fmt.Fprintf(&b, "   种子 %d\n", r.Seed)
 
+	// 位置不在记录里，但它能从庄家位和人数算出来——存一份等于给自己留一个对不上的机会。
+	button := -1
+	for i, s := range r.Seats {
+		if s.Player == r.Button {
+			button = i
+		}
+	}
+	var positions []string
+	if button >= 0 {
+		positions = poker.Positions(len(r.Seats), button)
+	}
+	at := func(i int) string {
+		if positions == nil {
+			return ""
+		}
+		return " " + positions[i]
+	}
+
 	stacks := make([]string, 0, len(r.Seats))
 	holes := make([]string, 0, len(r.Seats))
-	for _, s := range r.Seats {
-		stacks = append(stacks, fmt.Sprintf("%s %d", s.Player, s.Stack))
+	for i, s := range r.Seats {
+		stacks = append(stacks, fmt.Sprintf("%s%s %d", s.Player, at(i), s.Stack))
 		holes = append(holes, fmt.Sprintf("%s %s", s.Player, cards(r.Hole[s.Player])))
 	}
 	fmt.Fprintf(&b, "   筹码  %s\n", strings.Join(stacks, " | "))

@@ -4,6 +4,8 @@ import "fmt"
 
 const (
 	holeCardCount = 2
+	// communityCardCount 是一手牌最多翻几张公共牌：翻牌 3 张、转牌河牌各 1 张。
+	communityCardCount = 5
 	// maxIllegalActions 是同一轮里能连续犯几次非法动作。到第三次就替他做决定（ADR-0011）：
 	// 无限重试会让一个写坏的 agent 把牌桌卡死，而直接判负又让它无从纠错。
 	maxIllegalActions = 3
@@ -104,6 +106,11 @@ func NewHand(number int, seats []Seat, button int, blinds Blinds, d *Deck) (*Han
 		if s.Stack <= 0 {
 			panic("poker: 没有筹码的人不能进入一手牌")
 		}
+	}
+	// 一副牌发不出这么多人的话，在这里说清楚。不挡的话，它会在半路某次
+	// Draw 里蹦出一句「牌堆已空」——那时候牌都发一半了，谁也看不出是人太多。
+	if need := len(seats)*holeCardCount + communityCardCount; d.Remaining() < need {
+		panic(fmt.Sprintf("poker: %d 个人要 %d 张牌，牌堆只有 %d 张", len(seats), need, d.Remaining()))
 	}
 	n := len(seats)
 	h := &Hand{
@@ -747,10 +754,12 @@ func (h *Hand) orderFromButton() []string {
 }
 
 func (h *Hand) seatViews() []SeatView {
+	positions := Positions(len(h.seats), h.button)
 	out := make([]SeatView, len(h.seats))
 	for i, s := range h.seats {
 		out[i] = SeatView{
 			Player:    s.player,
+			Position:  positions[i],
 			Stack:     s.stack,
 			Committed: s.street,
 			Total:     s.committed,

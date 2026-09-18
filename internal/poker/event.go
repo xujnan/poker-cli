@@ -98,6 +98,9 @@ type ShowdownEntry struct {
 type SeatView struct {
 	Player string `json:"player"`
 	Stack  int    `json:"stack"`
+	// Position 是这手牌里的位置（BTN / SB / BB / UTG / HJ / CO …）。
+	// 只在牌局进行中有值——两手牌之间没有庄家位，也就没有位置可言。
+	Position string `json:"position,omitempty"`
 	// Committed 是本 Street 的投入，Total 是本手牌的总投入。
 	Committed  int  `json:"committed,omitempty"`
 	Total      int  `json:"total,omitempty"`
