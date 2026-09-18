@@ -5,13 +5,50 @@ import (
 	"testing"
 )
 
-func TestPlayHandDealsDistinctCards(t *testing.T) {
-	players := []string{"alice", "bob", "carol"}
-	d := NewDeck(rand.New(rand.NewPCG(1, 2)))
-	res, _ := PlayHand(1, players, d)
+// dealHand 起一手牌，名字固定，方便各测试引用。
+func dealHand(t *testing.T, stacks []int, button int, seed uint64) (*Hand, []Event) {
+	t.Helper()
+	names := []string{"alice", "bob", "carol", "dave"}
+	seats := make([]Seat, len(stacks))
+	for i, s := range stacks {
+		seats[i] = Seat{Player: names[i], Stack: s}
+	}
+	d := NewDeck(rand.New(rand.NewPCG(seed, 7)))
+	return NewHand(1, seats, button, Blinds{1, 2}, d)
+}
+
+// callOrCheck 是「谁都不弃牌」的策略，用来把牌局稳稳推到摊牌。
+func callOrCheck(snap *Snapshot) Action {
+	if _, ok := legalOf(snap, "check"); ok {
+		return Action{Kind: Check}
+	}
+	return Action{Kind: Call}
+}
+
+// playOut 按给定策略把一手牌打完。
+func playOut(t *testing.T, h *Hand, events []Event, pick func(*Snapshot) Action) []Event {
+	t.Helper()
+	for guard := 0; !h.Done(); guard++ {
+		if guard > 500 {
+			t.Fatal("牌局停不下来")
+		}
+		player := h.Turn()
+		snap := lastSnapshotFor(events, player)
+		if snap == nil {
+			t.Fatalf("轮到 %s 却没给他快照", player)
+		}
+		events = append(events, h.Apply(player, pick(snap))...)
+	}
+	return events
+}
+
+func TestHandDealsDistinctCards(t *testing.T) {
+	h, events := dealHand(t, []int{200, 200, 200}, 0, 1)
+	playOut(t, h, events, callOrCheck)
+	res := h.Result()
 
 	seen := map[Card]string{}
-	for _, p := range players {
+	for _, p := range res.Players {
 		if len(res.Hole[p]) != holeCardCount {
 			t.Fatalf("%s 有 %d 张底牌", p, len(res.Hole[p]))
 		}
@@ -22,7 +59,7 @@ func TestPlayHandDealsDistinctCards(t *testing.T) {
 			seen[c] = p
 		}
 	}
-	if len(res.Community) != communityCardCount {
+	if len(res.Community) != 5 {
 		t.Fatalf("公共牌有 %d 张", len(res.Community))
 	}
 	for _, c := range res.Community {
@@ -31,27 +68,26 @@ func TestPlayHandDealsDistinctCards(t *testing.T) {
 		}
 		seen[c] = "board"
 	}
-	if want := 52 - (len(players)*holeCardCount + communityCardCount); d.Remaining() != want {
-		t.Fatalf("牌堆剩 %d 张，应该剩 %d 张", d.Remaining(), want)
-	}
 }
 
-// TestPlayHandIsReproducible 是 ADR-0004 那条 --seed 的意义所在：
-// 同一个种子必须打出同一手牌，否则边池这类逻辑将来根本没法写回归测试。
-func TestPlayHandIsReproducible(t *testing.T) {
-	players := []string{"alice", "bob", "carol"}
+// TestHandIsReproducible 是 ADR-0004 那条 --seed 的意义所在：
+// 同一个种子加同一串动作，必须打出同一手牌。
+func TestHandIsReproducible(t *testing.T) {
 	run := func() HandResult {
-		d := NewDeck(rand.New(rand.NewPCG(20240601, 0x9E3779B97F4A7C15)))
-		res, _ := PlayHand(1, players, d)
-		return res
+		h, events := dealHand(t, []int{200, 150, 80}, 1, 20240601)
+		playOut(t, h, events, callOrCheck)
+		return h.Result()
 	}
 	a, b := run(), run()
 
-	for _, p := range players {
+	for _, p := range a.Players {
 		for i := range a.Hole[p] {
 			if a.Hole[p][i] != b.Hole[p][i] {
 				t.Fatalf("同种子两次运行，%s 的底牌不同：%v vs %v", p, a.Hole[p], b.Hole[p])
 			}
+		}
+		if a.Stacks[p] != b.Stacks[p] {
+			t.Fatalf("同种子两次运行，%s 的筹码不同：%d vs %d", p, a.Stacks[p], b.Stacks[p])
 		}
 	}
 	for i := range a.Community {
@@ -59,83 +95,143 @@ func TestPlayHandIsReproducible(t *testing.T) {
 			t.Fatalf("同种子两次运行，公共牌不同：%v vs %v", a.Community, b.Community)
 		}
 	}
-	if len(a.Winners) != len(b.Winners) || a.Winners[0] != b.Winners[0] {
-		t.Fatalf("同种子两次运行，赢家不同：%v vs %v", a.Winners, b.Winners)
-	}
 }
 
-func TestPlayHandWinnersHaveTheBestRank(t *testing.T) {
-	players := []string{"alice", "bob", "carol", "dave"}
-	// 多跑几个种子，顺便扫到平局那条分支。
-	for seed := uint64(1); seed <= 200; seed++ {
-		d := NewDeck(rand.New(rand.NewPCG(seed, 3)))
-		res, _ := PlayHand(1, players, d)
-		if len(res.Winners) == 0 {
-			t.Fatalf("seed %d：一手牌没有赢家", seed)
+// TestEachPotGoesToItsBestHand：每个池子都归有资格争夺它的人里牌最大的那个。
+//
+// 注意这条不变量是按池子说的，不是按整手牌说的：有边池的时候，
+// 一个牌力不是最强的人完全可能赢下某个边池，那不是 bug。
+func TestEachPotGoesToItsBestHand(t *testing.T) {
+	for seed := uint64(1); seed <= 120; seed++ {
+		r := rand.New(rand.NewPCG(seed, 555))
+		h, events := dealHand(t, []int{200, 120, 60, 35}, int(seed)%4, seed)
+		events = playOut(t, h, events, func(snap *Snapshot) Action {
+			return randomLegalAction(r, snap)
+		})
+		res := h.Result()
+		if len(res.Ranks) == 0 {
+			continue // 没摊牌的手不在这条测试的范围里
 		}
-		best := res.Ranks[res.Winners[0]]
-		for _, p := range players {
-			cmp := res.Ranks[p].Compare(best)
-			if cmp > 0 {
-				t.Fatalf("seed %d：%s 的牌力比赢家还强", seed, p)
-			}
-			isWinner := false
-			for _, w := range res.Winners {
-				if w == p {
-					isWinner = true
-					break
+		for _, pot := range res.Pots {
+			var best HandRank
+			first := true
+			for _, p := range pot.Eligible {
+				rank, ok := res.Ranks[p]
+				if !ok {
+					continue
+				}
+				if first || rank.Compare(best) > 0 {
+					best, first = rank, false
 				}
 			}
-			if isWinner != (cmp == 0) {
-				t.Fatalf("seed %d：%s 是否赢家(%v) 与牌力比较(%d) 不一致", seed, p, isWinner, cmp)
+			if first {
+				continue
+			}
+			for _, w := range pot.Winners {
+				if res.Ranks[w].Compare(best) != 0 {
+					t.Fatalf("seed %d：%s 赢下了一个池子，但他的牌不是这个池子里最大的", seed, w)
+				}
 			}
 		}
 	}
 }
 
-// TestPlayHandEventSequence 守住事件的形状与顺序：agent 是照着这个顺序写状态机的。
-func TestPlayHandEventSequence(t *testing.T) {
-	players := []string{"alice", "bob"}
-	d := NewDeck(rand.New(rand.NewPCG(11, 22)))
-	_, events := PlayHand(3, players, d)
+// TestHandEventSequence 守住事件的形状与顺序：agent 是照着这个顺序写状态机的。
+func TestHandEventSequence(t *testing.T) {
+	h, events := dealHand(t, []int{200, 200}, 0, 11)
+	events = playOut(t, h, events, callOrCheck)
 
+	// 开局固定是：hand_start、两个盲注、两份底牌，然后才轮到人说话。
 	want := []EventType{
-		EventHandStart,
-		EventHoleCards, EventHoleCards,
-		EventCommunityCards,
-		EventShowdown,
-		EventHandEnd,
-	}
-	if len(events) != len(want) {
-		t.Fatalf("事件数 = %d，想要 %d：%+v", len(events), len(want), events)
+		EventHandStart, EventBlind, EventBlind,
+		EventHoleCards, EventHoleCards, EventYourTurn,
 	}
 	for i, w := range want {
 		if events[i].Type != w {
 			t.Fatalf("第 %d 条事件是 %s，想要 %s", i, events[i].Type, w)
 		}
-		if events[i].Hand != 3 {
-			t.Fatalf("第 %d 条事件的手数是 %d，想要 3", i, events[i].Hand)
+	}
+	// 结尾固定是：摊牌、分池、结束。
+	tail := events[len(events)-3:]
+	for i, w := range []EventType{EventShowdown, EventPotAwarded, EventHandEnd} {
+		if tail[i].Type != w {
+			t.Fatalf("倒数第 %d 条事件是 %s，想要 %s", 3-i, tail[i].Type, w)
 		}
 	}
-
 	end := events[len(events)-1]
-	if end.Pot == nil {
-		t.Fatal("hand_end 必须带底池字段，哪怕它是 0")
+	if end.Pot == nil || *end.Pot == 0 {
+		t.Fatalf("hand_end 该带上真实的底池，得到 %v", end.Pot)
 	}
-	if *end.Pot != 0 {
-		t.Fatalf("第一刀没有下注，底池应该是 0，得到 %d", *end.Pot)
-	}
-	if len(end.Winners) == 0 {
-		t.Fatal("hand_end 没有赢家")
+	if len(end.Seats) != 2 {
+		t.Fatalf("hand_end 该带上各家结束时的筹码，得到 %+v", end.Seats)
 	}
 }
 
-func TestPlayHandRejectsLonePlayer(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("一个人也能开一手牌？应该 panic")
+// TestBlindsAreTakenBeforeCards：盲注先收，再发牌。
+func TestBlindsAreTakenBeforeCards(t *testing.T) {
+	h, events := dealHand(t, []int{200, 200, 200}, 0, 41)
+	var blindIdx, holeIdx = -1, -1
+	for i, ev := range events {
+		if ev.Type == EventBlind && blindIdx < 0 {
+			blindIdx = i
 		}
-	}()
-	d := NewDeck(rand.New(rand.NewPCG(1, 1)))
-	PlayHand(1, []string{"alice"}, d)
+		if ev.Type == EventHoleCards && holeIdx < 0 {
+			holeIdx = i
+		}
+	}
+	if blindIdx > holeIdx {
+		t.Fatal("盲注该在发牌之前收")
+	}
+	// 底池里此刻正好是两个盲注。
+	snap := lastSnapshotFor(events, h.Turn())
+	if snap.Pot != 3 {
+		t.Fatalf("收完 1/2 盲注后底池该是 3，得到 %d", snap.Pot)
+	}
+}
+
+// TestShortStackPostsPartialBlind：筹码不够交满盲注的人，交多少算多少并直接 all-in。
+func TestShortStackPostsPartialBlind(t *testing.T) {
+	h, events := dealHand(t, []int{200, 200, 1}, 0, 43)
+	// 座位：alice(button) bob(小盲) carol(大盲)，carol 只有 1 块，交不满 2 块大盲。
+	var bigBlind Event
+	for _, ev := range events {
+		if ev.Type == EventBlind && ev.Action == "big_blind" {
+			bigBlind = ev
+		}
+	}
+	if bigBlind.Amount != 1 {
+		t.Fatalf("carol 只交得起 1 块大盲，得到 %d", bigBlind.Amount)
+	}
+	if *bigBlind.Stack != 0 {
+		t.Fatalf("交完之后她该一分不剩，得到 %d", *bigBlind.Stack)
+	}
+	playOut(t, h, events, callOrCheck)
+	total := 0
+	for _, s := range h.Result().Stacks {
+		total += s
+	}
+	if total != 401 {
+		t.Fatalf("筹码总额该是 401，得到 %d", total)
+	}
+}
+
+func TestNewHandRejectsBadSeats(t *testing.T) {
+	t.Run("一个人开不了牌", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("应该 panic")
+			}
+		}()
+		d := NewDeck(rand.New(rand.NewPCG(1, 1)))
+		NewHand(1, []Seat{{"alice", 100}}, 0, Blinds{1, 2}, d)
+	})
+	t.Run("没筹码的人不能入座", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("应该 panic")
+			}
+		}()
+		d := NewDeck(rand.New(rand.NewPCG(1, 1)))
+		NewHand(1, []Seat{{"alice", 100}, {"bob", 0}}, 0, Blinds{1, 2}, d)
+	})
 }

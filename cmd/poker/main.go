@@ -12,16 +12,20 @@ import (
 	"time"
 
 	"github.com/xujnan/poker-cli/internal/client"
+	"github.com/xujnan/poker-cli/internal/poker"
 	"github.com/xujnan/poker-cli/internal/server"
 )
 
 const usage = `用法：
-  poker serve [--seed N] [--hand-delay 3s]     开一张牌桌，打印 Table Code
-  poker join <CODE> --as <名字> [--format ...]  以人的身份坐下
-  poker bot  <CODE> --as <名字>                 以机器人的身份坐下（独立进程，走与 agent 相同的接口）
+  poker serve [--blinds 1/2] [--seed N] [--hand-delay 3s] [--timeout 30s]  开一张牌桌，打印 Table Code
+  poker join <CODE> --as <名字> [--buyin N] [--format ...]  以人的身份坐下
+  poker bot  <CODE> --as <名字> [--buyin N]                 以机器人的身份坐下（独立进程，走与 agent 相同的接口）
 
 各子命令的 --help 里有完整参数。
 `
+
+// defaultBuyinBigBlinds 是默认带入，按大盲的倍数算。100 个大盲是常见的坐下深度。
+const defaultBuyinBigBlinds = 100
 
 func main() {
 	if len(os.Args) < 2 {
@@ -51,26 +55,40 @@ func main() {
 
 func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	blindsFlag := fs.String("blinds", "1/2", "盲注，写成 小盲/大盲")
+	buyin := fs.Int("buyin", 0, "默认带入，留空则取 100 个大盲")
 	seed := fs.Uint64("seed", 0, "洗牌随机种子，0 表示每次都不一样。给定同一个种子，牌序完全可复现")
 	handDelay := fs.Duration("hand-delay", 3*time.Second, "两手牌之间的间隔，自对弈时设 0")
+	timeout := fs.Duration("timeout", 30*time.Second, "单次行动的时限，到点按「能过牌就过牌，否则弃牌」处理；设 0 表示不限时")
 	code := fs.String("code", "", "指定 Table Code，留空则随机生成")
 	dir := fs.String("dir", "", "socket 所在目录，留空取 ~/.poker")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
+	blinds, err := poker.ParseBlinds(*blindsFlag)
+	if err != nil {
+		return err
+	}
+	if *buyin == 0 {
+		*buyin = blinds.Big * defaultBuyinBigBlinds
+	}
+
 	s, err := server.New(server.Options{
-		Dir:       *dir,
-		Code:      *code,
-		Rand:      newRand(*seed),
-		HandDelay: *handDelay,
-		Log:       os.Stderr,
+		Dir:           *dir,
+		Code:          *code,
+		Rand:          newRand(*seed),
+		HandDelay:     *handDelay,
+		ActionTimeout: *timeout,
+		Blinds:        blinds,
+		Buyin:         *buyin,
+		Log:           os.Stderr,
 	})
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("牌桌已开：%s\n", s.Code())
+	fmt.Printf("牌桌已开：%s（盲注 %s，默认带入 %d）\n", s.Code(), blinds, *buyin)
 	fmt.Printf("加入：poker join %s --as <你的名字>\n", s.Code())
 	fmt.Printf("监听：%s\n", s.Path())
 	if *seed != 0 {
@@ -93,6 +111,7 @@ func runServe(args []string) error {
 func runJoin(args []string) error {
 	fs := flag.NewFlagSet("join", flag.ExitOnError)
 	name := fs.String("as", "", "你在牌桌上的名字（必填）")
+	buyin := fs.Int("buyin", 0, "带入多少筹码，留空则用牌桌的默认值")
 	format := fs.String("format", client.FormatText, "输出格式：text 给人看，jsonl 给 agent 看")
 	dir := fs.String("dir", "", "socket 所在目录，留空取 ~/.poker")
 	code, err := parseCodeAndFlags(fs, args, "join")
@@ -106,7 +125,7 @@ func runJoin(args []string) error {
 		return fmt.Errorf("--format 只能是 %s 或 %s", client.FormatText, client.FormatJSONL)
 	}
 
-	s, err := client.Dial(*dir, code, *name)
+	s, err := client.Dial(*dir, code, *name, *buyin)
 	if err != nil {
 		return err
 	}
@@ -117,6 +136,7 @@ func runJoin(args []string) error {
 func runBot(args []string) error {
 	fs := flag.NewFlagSet("bot", flag.ExitOnError)
 	name := fs.String("as", "", "机器人在牌桌上的名字（必填）")
+	buyin := fs.Int("buyin", 0, "带入多少筹码，留空则用牌桌的默认值")
 	dir := fs.String("dir", "", "socket 所在目录，留空取 ~/.poker")
 	code, err := parseCodeAndFlags(fs, args, "bot")
 	if err != nil {
@@ -126,7 +146,7 @@ func runBot(args []string) error {
 		return fmt.Errorf("必须用 --as 指定名字")
 	}
 
-	s, err := client.Dial(*dir, code, *name)
+	s, err := client.Dial(*dir, code, *name, *buyin)
 	if err != nil {
 		return err
 	}

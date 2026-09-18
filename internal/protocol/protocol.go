@@ -21,15 +21,70 @@ const (
 	CmdJoin CommandType = "join"
 	// CmdQuit 主动离座。直接断开连接也是一样的效果，这条命令只是让意图显式。
 	CmdQuit CommandType = "quit"
+
+	// 五种动作各自是一个命令类型。这样 agent 发出去的就是 {"type":"call"}，
+	// 跟 your_turn 里合法动作列表给的名字一模一样，中间不隔一层包装。
+	CmdFold  CommandType = "fold"
+	CmdCheck CommandType = "check"
+	CmdCall  CommandType = "call"
+	// CmdBet 的 Amount 是「把本轮总投入推到多少」，不是「再加多少」（ADR-0005）。
+	CmdBet   CommandType = "bet"
+	CmdAllIn CommandType = "allin"
 )
 
 // Command 是客户端发往服务端的一条命令。
-//
-// 下注类命令（ADR-0005 的 bet / call / check / fold / allin）还没进来，
-// 等它们进来时在这里加字段，而不是另开一套格式。
 type Command struct {
 	Type CommandType `json:"type"`
-	Name string      `json:"name,omitempty"`
+	// Name 和 Buyin 只在 join 时用。
+	Name  string `json:"name,omitempty"`
+	Buyin int    `json:"buyin,omitempty"`
+	// Amount 只在 bet 时用。
+	Amount int `json:"amount,omitempty"`
+}
+
+// IsAction 判断这条命令是不是一个牌桌动作。
+func (c Command) IsAction() bool {
+	switch c.Type {
+	case CmdFold, CmdCheck, CmdCall, CmdBet, CmdAllIn:
+		return true
+	}
+	return false
+}
+
+// Action 把命令翻译成牌局动作。只有 IsAction 为真时才有意义。
+func (c Command) Action() (poker.Action, error) {
+	switch c.Type {
+	case CmdFold:
+		return poker.Action{Kind: poker.Fold}, nil
+	case CmdCheck:
+		return poker.Action{Kind: poker.Check}, nil
+	case CmdCall:
+		return poker.Action{Kind: poker.Call}, nil
+	case CmdAllIn:
+		return poker.Action{Kind: poker.AllIn}, nil
+	case CmdBet:
+		if c.Amount <= 0 {
+			return poker.Action{}, fmt.Errorf("bet 要带一个正数额")
+		}
+		return poker.Action{Kind: poker.BetTo, Amount: c.Amount}, nil
+	}
+	return poker.Action{}, fmt.Errorf("%q 不是一个动作", c.Type)
+}
+
+// CommandOf 把牌局动作翻译成命令，客户端发指令时用。
+func CommandOf(a poker.Action) Command {
+	switch a.Kind {
+	case poker.Fold:
+		return Command{Type: CmdFold}
+	case poker.Check:
+		return Command{Type: CmdCheck}
+	case poker.Call:
+		return Command{Type: CmdCall}
+	case poker.AllIn:
+		return Command{Type: CmdAllIn}
+	default:
+		return Command{Type: CmdBet, Amount: a.Amount}
+	}
 }
 
 // MaxLineBytes 是单行的长度上限。给一行 JSON 设上限，是为了让一个坏掉的对端

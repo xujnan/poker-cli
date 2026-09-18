@@ -1,7 +1,7 @@
 // Package client 连上一张牌桌，把事件流交给人或机器人。
 //
 // 人类客户端和机器人客户端共用这里的 Session：同一个 socket、同一份 JSONL 事件流、
-// 同一条代码路径（ADR-0002、ADR-0010）。两者的差别只在拿到事件之后做什么。
+// 同一条代码路径（ADR-0002、ADR-0010）。两者的差别只在拿到 your_turn 之后怎么决定。
 package client
 
 import (
@@ -29,10 +29,10 @@ type Session struct {
 	name   string
 }
 
-// Dial 连上 Table Code 对应的牌桌并报上名字。
+// Dial 连上 Table Code 对应的牌桌并报上名字与带入。
 //
 // 「加入牌桌」在这里就是拼一次路径再连一次 socket——没有服务发现这一步（ADR-0013）。
-func Dial(dir, code, name string) (*Session, error) {
+func Dial(dir, code, name string, buyin int) (*Session, error) {
 	if dir == "" {
 		d, err := protocol.DefaultDir()
 		if err != nil {
@@ -49,7 +49,7 @@ func Dial(dir, code, name string) (*Session, error) {
 		return nil, fmt.Errorf("client: 连不上牌桌 %s（%s）：%w", strings.ToUpper(code), path, err)
 	}
 	// 名字即身份，没有握手也没有凭据（ADR-0009）。
-	if err := protocol.WriteCommand(conn, protocol.Command{Type: protocol.CmdJoin, Name: name}); err != nil {
+	if err := protocol.WriteCommand(conn, protocol.Command{Type: protocol.CmdJoin, Name: name, Buyin: buyin}); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("client: 加入牌桌失败: %w", err)
 	}
@@ -65,7 +65,7 @@ func (s *Session) Next() (poker.Event, []byte, error) { return s.events.Next() }
 // Send 发一条命令给服务端。
 func (s *Session) Send(cmd protocol.Command) error { return protocol.WriteCommand(s.conn, cmd) }
 
-// Close 断开连接。断线在服务端看来就是离座。
+// Close 断开连接。断线在服务端看来就是 Sitting Out，筹码留在座位上。
 func (s *Session) Close() error { return s.conn.Close() }
 
 // Play 跑人类客户端：把事件渲染出来，同时从 in 读命令。
@@ -101,25 +101,43 @@ func Play(s *Session, format string, out io.Writer, in io.Reader) error {
 
 // readCommands 从标准输入读命令。
 //
-// 第一刀能说的话只有 quit 和 help——下注命令（ADR-0005）还没进来。
-// 这里先用 bufio.Scanner；等真有 bet 要输入、而事件又在不断刷屏时，再上擦除重绘那一套。
+// 这里仍然是最朴素的一行一读。等到「事件在刷屏、你正在输一半 bet」真的难受起来时，
+// 再上擦除重绘那一套——在那之前引一个 readline 依赖是提前付账。
 func readCommands(s *Session, in io.Reader, out io.Writer) {
 	sc := bufio.NewScanner(in)
 	for sc.Scan() {
-		switch line := strings.TrimSpace(sc.Text()); line {
+		line := strings.TrimSpace(sc.Text())
+		switch line {
 		case "":
+			continue
 		case "quit", "exit":
 			_ = s.Send(protocol.Command{Type: protocol.CmdQuit})
 			_ = s.Close()
 			return
 		case "help":
-			fmt.Fprintln(out, "可用命令：help、quit。下注命令还没实现。")
-		default:
-			fmt.Fprintf(out, "不认识的命令 %q，试试 help。\n", line)
+			fmt.Fprintln(out, helpText)
+			continue
+		}
+		action, err := poker.ParseAction(line)
+		if err != nil {
+			fmt.Fprintf(out, "%v\n", err)
+			continue
+		}
+		if err := s.Send(protocol.CommandOf(action)); err != nil {
+			fmt.Fprintf(out, "发不出去：%v\n", err)
+			return
 		}
 	}
 	// 标准输入关了（比如管道结束），但牌桌可能还在打，继续看着就行。
 }
+
+const helpText = `可用命令：
+  fold          弃牌
+  check         过牌
+  call          跟注
+  bet <数额>    把本轮总投入推到这个数（不是「再加」这么多）
+  allin         推光
+  help / quit`
 
 // RunBot 跑一个机器人客户端。
 //
@@ -139,20 +157,103 @@ func RunBot(s *Session, out io.Writer) error {
 		if line := Render(ev); line != "" {
 			fmt.Fprintln(out, line)
 		}
-		for _, cmd := range decide(ev) {
-			if err := s.Send(cmd); err != nil {
-				return err
-			}
+		if ev.Type != poker.EventYourTurn || ev.Snapshot == nil {
+			continue
+		}
+		action := Decide(ev.Snapshot)
+		fmt.Fprintf(out, "→ %s\n", action)
+		if err := s.Send(protocol.CommandOf(action)); err != nil {
+			return err
 		}
 	}
 }
 
-// decide 是机器人的全部大脑。
+// Decide 是机器人的全部大脑：一个够笨但不会乱来的策略。
 //
-// 第一刀里没有任何轮到自己行动的时刻——没有下注轮，也就没有 your_turn 事件——
-// 所以它固定不做事。等 your_turn（ADR-0007，内嵌快照与合法动作列表）进来时，
-// 新逻辑加在这个函数里，服务端一行都不用动。
-func decide(ev poker.Event) []protocol.Command {
-	_ = ev
-	return nil
+// 它只读 your_turn 里那份快照，不自己记牌、不累积状态——这正是 ADR-0007 里
+// 「agent 可以完全无状态」那句话的意思。它也只从快照给出的合法动作列表里选，
+// 从不自己推导此刻能不能 check，所以它永远不会收到一条非法动作的错误。
+//
+// 打得好不好不是重点。重点是每次本地对战都有一个真实的 agent 在走这条接口。
+func Decide(snap *poker.Snapshot) poker.Action {
+	canCheck := hasLegal(snap, "check")
+	bet, canBet := legalOf(snap, "bet")
+
+	switch strength(snap) {
+	case strong:
+		if canBet {
+			// 加注到最小加注额。够用，而且不会把自己推进算不清的局面。
+			return poker.Action{Kind: poker.BetTo, Amount: bet.Min}
+		}
+		if canCheck {
+			return poker.Action{Kind: poker.Check}
+		}
+		return poker.Action{Kind: poker.Call}
+	case medium:
+		if canCheck {
+			return poker.Action{Kind: poker.Check}
+		}
+		// 便宜就跟，贵了就走。八分之一的筹码是随手定的一条线，不是什么策略洞见。
+		if snap.ToCall*8 <= snap.Stack {
+			return poker.Action{Kind: poker.Call}
+		}
+		return poker.Action{Kind: poker.Fold}
+	default:
+		if canCheck {
+			return poker.Action{Kind: poker.Check}
+		}
+		return poker.Action{Kind: poker.Fold}
+	}
+}
+
+type handStrength int
+
+const (
+	weak handStrength = iota
+	medium
+	strong
+)
+
+// strength 给当前局面一个粗糙的三档评价。
+func strength(snap *poker.Snapshot) handStrength {
+	cards := append(append([]poker.Card(nil), snap.Hole...), snap.Community...)
+	if len(cards) >= 5 {
+		// 翻牌之后就有五张牌可评了，直接用真正的牌力评估器。
+		rank := poker.Evaluate(cards)
+		switch {
+		case rank.Category >= poker.TwoPair:
+			return strong
+		case rank.Category == poker.OnePair:
+			return medium
+		default:
+			return weak
+		}
+	}
+	// preflop 只有两张底牌，评估器用不上，只好看牌面。
+	if len(snap.Hole) < 2 {
+		return weak
+	}
+	a, b := snap.Hole[0].Rank, snap.Hole[1].Rank
+	switch {
+	case a == b:
+		return strong
+	case a >= poker.Ten && b >= poker.Ten:
+		return medium
+	default:
+		return weak
+	}
+}
+
+func hasLegal(snap *poker.Snapshot, action string) bool {
+	_, ok := legalOf(snap, action)
+	return ok
+}
+
+func legalOf(snap *poker.Snapshot, action string) (poker.LegalAction, bool) {
+	for _, l := range snap.Legal {
+		if l.Action == action {
+			return l, true
+		}
+	}
+	return poker.LegalAction{}, false
 }

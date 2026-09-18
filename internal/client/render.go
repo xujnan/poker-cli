@@ -15,18 +15,34 @@ import (
 func Render(ev poker.Event) string {
 	switch ev.Type {
 	case poker.EventTable:
-		return fmt.Sprintf("已加入牌桌，在座：%s", join(ev.Players))
+		return fmt.Sprintf("已加入牌桌（盲注 %s），在座：%s", ev.Blinds, seatLine(ev.Seats))
 	case poker.EventJoined:
-		return fmt.Sprintf("* %s 加入了牌桌（在座 %d 人）", ev.Player, len(ev.Players))
+		return fmt.Sprintf("* %s 加入了牌桌", ev.Player)
 	case poker.EventLeft:
-		return fmt.Sprintf("* %s 离开了牌桌（在座 %d 人）", ev.Player, len(ev.Players))
+		return fmt.Sprintf("* %s 离开了牌桌", ev.Player)
+	case poker.EventSitOut:
+		return fmt.Sprintf("* %s 暂离（%s），座位和筹码留着", ev.Player, ev.Message)
+
 	case poker.EventHandStart:
-		return fmt.Sprintf("\n── 第 %d 手 ──  %s", ev.Hand, strings.Join(ev.Players, " vs "))
+		return fmt.Sprintf("\n── 第 %d 手 ──  庄家 %s，盲注 %s\n   %s",
+			ev.Hand, ev.Button, ev.Blinds, seatLine(ev.Seats))
+	case poker.EventBlind:
+		name := "小盲"
+		if ev.Action == "big_blind" {
+			name = "大盲"
+		}
+		return fmt.Sprintf("%s %s %d%s", ev.Player, name, ev.Amount, allinSuffix(ev))
 	case poker.EventHoleCards:
 		// hole_cards 只会投递给它的主人，所以这里说「你的」永远没错。
 		return fmt.Sprintf("你的底牌：%s", cards(ev.Cards))
-	case poker.EventCommunityCards:
-		return fmt.Sprintf("公共牌：  %s", cards(ev.Cards))
+
+	case poker.EventYourTurn:
+		return renderTurn(ev.Snapshot)
+	case poker.EventAction:
+		return renderAction(ev)
+	case poker.EventStreet:
+		return fmt.Sprintf("\n%s：%s   底池 %d", streetName(ev.Street), cards(ev.Board), potOf(ev))
+
 	case poker.EventShowdown:
 		lines := make([]string, 0, len(ev.Showdown)+1)
 		lines = append(lines, "摊牌：")
@@ -34,25 +50,134 @@ func Render(ev poker.Event) string {
 			lines = append(lines, fmt.Sprintf("  %-10s %s  →  %s（%s）", e.Player, cards(e.Cards), e.Category, cards(e.Best)))
 		}
 		return strings.Join(lines, "\n")
+	case poker.EventPotAwarded:
+		lines := make([]string, 0, len(ev.Pots))
+		for i, pot := range ev.Pots {
+			label := "底池"
+			if i > 0 {
+				label = fmt.Sprintf("边池 %d", i)
+			}
+			lines = append(lines, fmt.Sprintf("%s %d → %s", label, pot.Amount, strings.Join(pot.Winners, "、")))
+		}
+		return strings.Join(lines, "\n")
 	case poker.EventHandEnd:
-		pot := 0
-		if ev.Pot != nil {
-			pot = *ev.Pot
-		}
-		switch len(ev.Winners) {
-		case 0:
-			return "这手牌没有赢家"
-		case 1:
-			return fmt.Sprintf("%s 赢下这手牌（底池 %d）", ev.Winners[0], pot)
-		default:
-			return fmt.Sprintf("%s 平分底池（底池 %d）", join(ev.Winners), pot)
-		}
+		return fmt.Sprintf("这手牌结束，底池 %d。%s", potOf(ev), seatLine(ev.Seats))
+
 	case poker.EventError:
-		return fmt.Sprintf("错误 [%s] %s", ev.Code, ev.Message)
+		return fmt.Sprintf("✗ [%s] %s", ev.Code, ev.Message)
 	default:
 		// 不认识的事件也要露个面：静默丢弃会让人以为牌桌卡住了。
 		return fmt.Sprintf("(未知事件 %s)", ev.Type)
 	}
+}
+
+// renderTurn 是人类玩家最需要看清楚的一屏：牌、池、要跟多少、能做什么。
+func renderTurn(snap *poker.Snapshot) string {
+	if snap == nil {
+		return "轮到你了"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n轮到你了（%s）\n", streetName(snap.Street))
+	fmt.Fprintf(&b, "  底牌 %s", cards(snap.Hole))
+	if len(snap.Community) > 0 {
+		fmt.Fprintf(&b, "   公共牌 %s", cards(snap.Community))
+	}
+	fmt.Fprintf(&b, "\n  底池 %d   你的筹码 %d", snap.Pot, snap.Stack)
+	if snap.ToCall > 0 {
+		fmt.Fprintf(&b, "   要跟 %d", snap.ToCall)
+	}
+	b.WriteString("\n  可以：")
+	opts := make([]string, 0, len(snap.Legal))
+	for _, l := range snap.Legal {
+		switch l.Action {
+		case "call":
+			opts = append(opts, fmt.Sprintf("call（跟 %d）", l.Amount))
+		case "bet":
+			opts = append(opts, fmt.Sprintf("bet <%d-%d>", l.Min, l.Max))
+		case "allin":
+			opts = append(opts, fmt.Sprintf("allin（推 %d）", l.Amount))
+		default:
+			opts = append(opts, l.Action)
+		}
+	}
+	b.WriteString(strings.Join(opts, " / "))
+	return b.String()
+}
+
+func renderAction(ev poker.Event) string {
+	var what string
+	switch ev.Action {
+	case "fold":
+		what = "弃牌"
+	case "check":
+		what = "过牌"
+	case "call":
+		what = fmt.Sprintf("跟注 %d", ev.Amount)
+	case "bet":
+		what = fmt.Sprintf("下注到 %d", ev.Committed)
+	case "allin":
+		what = fmt.Sprintf("全下 %d（本轮共 %d）", ev.Amount, ev.Committed)
+	default:
+		what = ev.Action
+	}
+	line := fmt.Sprintf("%s %s", ev.Player, what)
+	if ev.Forced {
+		line += "（超时代打）"
+	}
+	if ev.Pot != nil && ev.Action != "fold" && ev.Action != "check" {
+		line += fmt.Sprintf("，底池 %d", *ev.Pot)
+	}
+	return line
+}
+
+func streetName(s string) string {
+	switch s {
+	case "preflop":
+		return "翻牌前"
+	case "flop":
+		return "翻牌"
+	case "turn":
+		return "转牌"
+	case "river":
+		return "河牌"
+	}
+	return s
+}
+
+func allinSuffix(ev poker.Event) string {
+	if ev.Stack != nil && *ev.Stack == 0 {
+		return "（已全下）"
+	}
+	return ""
+}
+
+func potOf(ev poker.Event) int {
+	if ev.Pot == nil {
+		return 0
+	}
+	return *ev.Pot
+}
+
+// seatLine 把各家筹码排成一行。这里只渲染 SeatView 里有的东西——
+// 那个结构里根本没有放底牌的地方，渲染器也就没有机会把别人的牌印出来。
+func seatLine(seats []poker.SeatView) string {
+	if len(seats) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(seats))
+	for _, s := range seats {
+		tag := ""
+		switch {
+		case s.Folded:
+			tag = " 弃"
+		case s.AllIn:
+			tag = " 全下"
+		case s.SittingOut:
+			tag = " 暂离"
+		}
+		parts = append(parts, fmt.Sprintf("%s %d%s", s.Player, s.Stack, tag))
+	}
+	return strings.Join(parts, " | ")
 }
 
 func cards(cs []poker.Card) string {
@@ -62,5 +187,3 @@ func cards(cs []poker.Card) string {
 	}
 	return strings.Join(parts, " ")
 }
-
-func join(names []string) string { return strings.Join(names, "、") }
