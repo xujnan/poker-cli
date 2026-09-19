@@ -211,10 +211,23 @@ internal/client/   人类客户端与机器人客户端
 ```sh
 go test ./...
 go test -race ./...
+# 乱发命令，看牌桌崩不崩
+go test -run=NONE -fuzz=FuzzClientCommands -fuzztime=30s ./internal/server/
 ```
+
+每次 push 都在 CI 上跑一遍（`.github/workflows/ci.yml`）：gofmt、`go vet`、`go mod tidy` 之后没有变化、
+`go test -race ./...`，外加 30 秒模糊测试。`-race` 是重点——服务端是一个牌桌 goroutine 加每条连接两个，
+竞态在本地十次里可能九次不出现。
 
 几条最值得看的：
 
+- `cmd/poker/agentdoc_test.go` —— **把 docs/agent.md 里那段 Python 抠出来真跑一遍**：起真服务端、真对手，
+  打满 8 手，然后去历史里确认它自己按下过动作（而不是一路被超时代打）。代码是从文档里抠的，不是抄一份进测试——
+  抄一份的话两边会各自演化，而烂掉的恰恰是别人照着抄的那一份。事件改个字段名，这条当场红。
+- `internal/server/fuzz_test.go` —— 乱发命令，断言牌桌从不崩。发的不只是坏 JSON（那太容易挡），
+  还有结构合法、顺序和数额离谱的命令：没轮到就 bet、负数额、大到溢出的数——状态机的坑在这一类里。
+- `internal/server/crash_test.go` —— 牌桌真崩一次之后：前面打完的手牌一条不少地落了盘，
+  报出来的错里带着那一手的种子。没有种子，这个 bug 就只能靠运气再撞一次。
 - `internal/poker/deps_test.go` —— 牌局核心只能用标准库。以前不用测，因为整个模块没有依赖可违反。
 - `internal/textui/textui_test.go` —— 对齐这件事只能量，不能看。含四类以前算错的名字（组合重音、泰文、
   ZWJ emoji、扑克牌 emoji 🃏），以及一条对着真 pty 跑的：字符设备不等于终端，`> /dev/null` 不该被上色。

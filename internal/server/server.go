@@ -15,6 +15,7 @@ import (
 	"log"
 	"math/rand/v2"
 	"net"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -93,6 +94,8 @@ type Server struct {
 
 	mu    sync.Mutex
 	conns map[*conn]struct{}
+	// crash 记下牌桌 goroutine 是被 panic 打断的，由 Close 报出去。
+	crash error
 
 	// history 在 Serve 之前定下来，之后只由牌桌 goroutine 用。
 	history *history.Writer
@@ -185,6 +188,13 @@ func (s *Server) Blinds() poker.Blinds { return s.blinds }
 // 由调用方收到信号之后决定什么时候收。
 func (s *Server) Finished() <-chan struct{} { return s.finished }
 
+// Stopped 在牌桌停下来时关闭——不管是谁让它停的。
+//
+// 正常收桌是调用方自己调 Close，他知道；能让调用方措手不及的只有一种：
+// 牌桌 goroutine 崩了，自己把桌收了（见 catchCrash）。没有这个信号的话，
+// 那种情况下没有人会去调 Close，历史也就没人冲下盘。
+func (s *Server) Stopped() <-chan struct{} { return s.done }
+
 // handMeta 是当前这手牌开局时的样子。牌打完之后座位上的筹码已经变了，
 // 写历史要的是「开局前」那一份，所以得在发牌之前先留一份底。
 type handMeta struct {
@@ -229,6 +239,67 @@ func (s *Server) Serve() error {
 		}
 		s.startConn(nc)
 	}
+}
+
+// crashHook 只在测试里赋值，生产里恒为 nil。
+//
+// 在生产代码里为测试留口子是要付代价的，这里认这个代价：崩溃收尾那条路一旦写错，
+// 表现是「进程没了、历史少几手、没人知道为什么」——正是没有真实触发点就测不出来的
+// 那一类。而这个项目里所有能从外面触发 panic 的路都是要修掉的 bug，不是测试用的开关。
+var crashHook func(handNo int)
+
+// catchCrash 接住牌桌 goroutine 里的 panic，把它变成一次干净的收桌。
+//
+// 它**不是**在用 panic 代替错误处理（ADR-0019）。玩家能碰到的一切走的都是错误那条路：
+// 动作不合法回一条带 code 的 error 事件，轮次仍归他（ADR-0011）；命令解析不了
+// 也是 error。poker 包里那几处 panic 是契约断言——「一手牌至少两个人」这种，
+// 调用方违约才会触发，也就是我们自己的 bug，而服务端在调用前全挡住了。
+//
+// 这里要接住的是另一回事：任何 runtime panic（越界、nil 解引用）出现在这个
+// goroutine 里，整个进程就没了，异步队列里还没落盘的手牌历史跟着蒸发——
+// 包括出事那一手的种子，而那是唯一能复现它的东西。这个 bug 没法靠错误处理防住，
+// 你没法 if err != nil 掉一个 index out of range。
+//
+// 所以它的职责明确**不是**接着打：状态已经坏了，接着打等于悄悄把底池算错给某个人。
+// 它只做三件事——把手数和种子记下来、让历史落盘、干净收桌，然后由 Close 报出去。
+func (s *Server) catchCrash() {
+	p := recover()
+	if p == nil {
+		return
+	}
+	stack := debug.Stack()
+	err := fmt.Errorf("server: 第 %d 手（种子 %d）把牌桌打崩了: %v", s.handNo, s.handMeta.seed, p)
+
+	s.mu.Lock()
+	s.crash = err
+	s.mu.Unlock()
+
+	// 种子单独再说一遍：这一行就是复现它的全部输入。
+	s.log.Printf("%v\n复现：poker serve --seed %d（那一手的种子是 %d，历史文件里也有）\n%s",
+		err, s.handMeta.seed, s.handMeta.seed, stack)
+	s.shutdown()
+}
+
+// shutdown 发出「关」的信号并断开所有连接，但不等任何 goroutine 退出。
+//
+// 跟 Close 分开是因为牌桌 goroutine 自己也要能触发关闭（崩了的时候）：
+// 它在 wg 里，调 Close 就是等自己，直接死锁。
+func (s *Server) shutdown() {
+	s.stop.Do(func() {
+		close(s.done)
+		_ = s.ln.Close()
+		s.mu.Lock()
+		for c := range s.conns {
+			c.close()
+		}
+		s.mu.Unlock()
+	})
+}
+
+func (s *Server) crashErr() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.crash
 }
 
 // goTracked 起一个 Close 会等的 goroutine；已经在关了就不起。
@@ -283,16 +354,17 @@ func (s *Server) startConn(nc net.Conn) {
 
 // Close 关掉牌桌并等所有 goroutine 退出。牌桌状态是易失的，不落盘（ADR-0008）。
 func (s *Server) Close() error {
-	s.stop.Do(func() {
-		close(s.done)
-		_ = s.ln.Close()
-		s.mu.Lock()
-		for c := range s.conns {
-			c.close()
-		}
-		s.mu.Unlock()
-	})
+	s.shutdown()
 	s.wg.Wait()
+
+	if err := s.crashErr(); err != nil {
+		// 崩了的话，历史照样要冲下盘——出事那一手的种子就在里面，
+		// 而那是唯一能把这个 bug 原样重放出来的东西。
+		if s.history != nil {
+			_ = s.history.Close()
+		}
+		return err
+	}
 
 	if s.history != nil {
 		// 丢过东西就说出来。历史是尽力而为的（ADR-0016），但「尽力」不等于「悄悄地」。
@@ -340,6 +412,8 @@ func (s *Server) submit(r request) {
 // 后者不可省——连着却不说话的客户端会把整张牌桌冻住，而那在无人值守的自对弈里
 // 迟早会发生（断线还有接管兜着，装死没有）。
 func (s *Server) tableLoop() {
+	defer s.catchCrash()
+
 	var handTimer, actTimer *time.Timer
 	var handFire, actFire <-chan time.Time
 
@@ -499,12 +573,13 @@ func (s *Server) handleJoin(c *conn, cmd protocol.Command) {
 
 func (s *Server) sendTable(c *conn, name string) {
 	c.send(poker.Event{
-		Type:    poker.EventTable,
-		To:      name,
-		Player:  name,
-		Players: s.seatNames(),
-		Seats:   s.seatViews(),
-		Blinds:  s.blinds.String(),
+		Type:     poker.EventTable,
+		To:       name,
+		Player:   name,
+		Protocol: poker.ProtocolVersion,
+		Players:  s.seatNames(),
+		Seats:    s.seatViews(),
+		Blinds:   s.blinds.String(),
 	})
 }
 
@@ -568,6 +643,9 @@ func (s *Server) startHand() {
 	}
 
 	s.handNo++
+	if crashHook != nil {
+		crashHook(s.handNo)
+	}
 	hand, events := poker.NewHand(s.handNo, seats, button, s.blinds, poker.NewDeck(poker.RandFor(seed)))
 	s.hand = hand
 	s.handMeta = handMeta{seed: seed, button: active[button].name, seats: before, at: time.Now()}

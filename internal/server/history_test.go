@@ -17,6 +17,13 @@ import (
 // startTableWithHistory 开一张会写历史的牌桌，并把历史文件路径一并给出。
 func startTableWithHistory(t *testing.T) (*Server, string) {
 	t.Helper()
+	return startTableWithHistoryLog(t, io.Discard)
+}
+
+// startTableWithHistoryLog 跟上面一样，但把服务端日志引到 logOut——
+// 崩溃那条路要断言日志里有种子和调用栈。
+func startTableWithHistoryLog(t *testing.T, logOut io.Writer) (*Server, string) {
+	t.Helper()
 	dir := t.TempDir()
 	tr, err := transport.NewUnix(dir)
 	if err != nil {
@@ -29,7 +36,7 @@ func startTableWithHistory(t *testing.T) (*Server, string) {
 		ActionTimeout: 50 * time.Millisecond,
 		Blinds:        poker.Blinds{Small: 1, Big: 2},
 		Buyin:         testBuyin,
-		Log:           io.Discard,
+		Log:           logOut,
 	})
 	if err != nil {
 		t.Fatalf("开桌失败: %v", err)

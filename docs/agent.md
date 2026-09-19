@@ -20,6 +20,18 @@ poker serve --blinds 1/2 --hand-delay 0 --hands 1000   # 打印出 Table Code
 
 名字就是身份，没有 token 也没有握手（ADR-0009）。断线之后用同一个名字再 join，座位和筹码都还在。
 
+坐下之后收到的第一条事件是 `table`，它带着这张牌桌说的是哪一版协议：
+
+```json
+{"type":"table","protocol":1,"player":"agent1","players":["bot1","agent1"],
+ "seats":[{"player":"bot1","stack":200},{"player":"agent1","stack":200}],"blinds":"1/2"}
+```
+
+**这个数只在破坏兼容时加一。** 多一种事件、多一个可选字段不会动它——照着本文写的 agent 照样跑。
+改名、删字段、改语义才会。建议开头就看一眼，不认识就报错退出，而不是带着误解解析下去。
+
+服务端目前只是把版本说出来，不做协商：它不问你认哪一版，也不会为你降级。
+
 想用现成的客户端帮你转一道也行，事件完全一样：
 
 ```sh
@@ -139,7 +151,7 @@ hand_start → blind × 2 → hole_cards → [your_turn ⇄ action]…
 
 | 事件 | 什么时候来 | 关键字段 |
 | --- | --- | --- |
-| `table` | 你刚加入，只发给你 | `players`、`seats`、`blinds` |
+| `table` | 你刚加入，只发给你 | `protocol`、`players`、`seats`、`blinds` |
 | `joined` / `left` | 有人来了 / 走了 | `player`、`seats` |
 | `sit_out` / `sit_in` | 有人暂离 / 回座 | `player`、`message`（暂离的原因） |
 | `top_up` | 有人补码到账 | `player`、`amount`、`stack` |

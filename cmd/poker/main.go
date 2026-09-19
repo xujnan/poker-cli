@@ -134,6 +134,7 @@ func runServe(args []string) error {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	closed := make(chan struct{})
+	var closeErr error
 	go func() {
 		defer close(closed)
 		select {
@@ -141,8 +142,12 @@ func runServe(args []string) error {
 			fmt.Fprintln(os.Stderr, "收到退出信号，关闭牌桌。")
 		case <-s.Finished():
 			fmt.Fprintf(os.Stderr, "打满 %d 手，关闭牌桌。\n", *hands)
+		case <-s.Stopped():
+			// 牌桌自己停了。上面两条路都是我们主动关的，走到这儿只剩一种可能：
+			// 牌桌 goroutine 崩了，自己把桌收了。不接这一路的话，下面那个
+			// <-closed 会永远等下去——崩溃从「有日志有种子」变成「进程挂死」。
 		}
-		_ = s.Close()
+		closeErr = s.Close()
 	}()
 
 	err = s.Serve()
@@ -152,6 +157,10 @@ func runServe(args []string) error {
 	// 后面还有等 goroutine 退出、把手牌历史冲下盘。这里不等的话，进程会赶在
 	// 最后一手落盘之前退出，而那一手就这么没了，没有任何报错。
 	<-closed
+	// 崩溃是从 Close 报出来的，优先说它：Serve 那边看到的只是「监听器关了」。
+	if closeErr != nil {
+		return closeErr
+	}
 	return err
 }
 

@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # 版本跟着 go.mod 走。写死在这里的话，改 go.mod 时这儿会悄悄落后。
+          go-version-file: go.mod
+
+      # 格式先查：它最快，而且挂了说明提交前没跑过 gofmt。
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "下面这些文件没格式化："
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # 依赖必须是钉死的：go.mod/go.sum 被改过而没提交，在这儿露出来。
+      - name: go mod tidy 之后没有变化
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      # -race 是这个项目的重点：服务端是一个牌桌 goroutine 加每条连接两个，
+      # 竞态在本地十次里可能九次不出现，而 CI 每次都跑。
+      - name: go test -race
+        run: go test -race ./...
+
+      # 模糊测试的种子语料在普通 go test 里就会跑；这里额外跑一小轮真正的模糊，
+      # 让「客户端发什么进来都不该把牌桌搞崩」这条每次 push 都被新输入试一遍。
+      - name: 模糊测试（30 秒）
+        run: go test -run=NONE -fuzz=FuzzClientCommands -fuzztime=30s ./internal/server/

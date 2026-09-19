@@ -1,5 +1,19 @@
 package poker
 
+// ProtocolVersion 是事件流与命令的版本号，随 table 事件发给每个刚坐下的人。
+//
+// 有它才谈得上「以后还能改」。一个照着 docs/agent.md 写出来的 agent，此刻认的是
+// 今天这套字段；将来改名、加必填字段、动 legal 的形状，它会当场解析失败，
+// 而它没有任何办法说清「我认的是哪一版」——除非第一条消息里就写着。
+//
+// 加版本号要趁早：等外面真有 agent 在跑了，就再也没有一个可协商的起点了。
+// 现在只发不谈：服务端说自己是第几版，agent 自己决定认不认。真要做协商
+// （客户端报上自己认的版本、服务端降级或拒绝），那是另一个决定，到时候再说。
+//
+// 规矩：**只在破坏兼容时加一**。加一个新的可选字段、多一种事件类型，
+// 老 agent 照样跑得动，不动这个数；改名、删字段、改语义，才动。
+const ProtocolVersion = 1
+
 // EventType 是事件的类型标签，在 JSONL 输出里就是每行的 "type" 字段。
 type EventType string
 
@@ -65,6 +79,10 @@ type Event struct {
 
 	Button string `json:"button,omitempty"`
 	Blinds string `json:"blinds,omitempty"`
+
+	// Protocol 只出现在 table 事件上，是 agent 收到的第一条消息里的第一件事实：
+	// 这张牌桌说的是哪一版协议（见 ProtocolVersion）。
+	Protocol int `json:"protocol,omitempty"`
 
 	// Pot 用指针是为了让「底池为 0」能如实出现，而不是被 omitempty 吃掉。
 	Pot  *int  `json:"pot,omitempty"`
