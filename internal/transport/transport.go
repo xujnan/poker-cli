@@ -44,7 +44,7 @@ type Transport interface {
 func normalizeCode(code string) (string, error) {
 	code = strings.ToUpper(strings.TrimSpace(code))
 	if !poker.ValidTableCode(code) {
-		return "", fmt.Errorf("transport: %q 不是合法的 Table Code（%d 位大写字母数字，不含 I/O/0/1）",
+		return "", fmt.Errorf("transport: %q 不是合法的 Table Code（%d 位字母或数字，不分大小写）",
 			code, poker.TableCodeLength)
 	}
 	return code, nil

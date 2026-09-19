@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -187,13 +188,36 @@ func TestDialAfterCloseFails(t *testing.T) {
 	})
 }
 
+// TestHandPickedCodesWork：人自己挑的码，字母数字一律收，不分大小写。
+//
+// 生成的码避开 I/O/0/1 是为了念得清楚，但那从来不该变成拦别人的门槛——
+// `--code POKER0` 一眼就懂，被自己的程序拒掉只是添堵。这一条放在传输这一层，
+// 因为拒绝就发生在这儿（normalizeCode），而且每个实现都得给同一个答案。
+func TestHandPickedCodesWork(t *testing.T) {
+	eachTransport(t, func(t *testing.T, tr Transport) {
+		for _, code := range []string{"POKER0", "POKERO", "TABLE1", "IO01IO", "poker0"} {
+			ln, err := tr.Listen(code)
+			if err != nil {
+				t.Fatalf("%q 该开得了桌: %v", code, err)
+			}
+			// 大小写不该分家：小写敲进来的和大写是同一张桌。
+			c, err := tr.Dial(strings.ToLower(code))
+			if err != nil {
+				t.Fatalf("%q 用小写连不上: %v", code, err)
+			}
+			c.Close()
+			ln.Close()
+		}
+	})
+}
+
 // TestBadTableCodeIsRejected：非法的 Table Code 在每个实现上都得被挡下来。
 //
 // 这条对同机传输是安全边界（码要拼进文件路径，藏着 ../ 就不是在找牌桌了），
 // 但它不该只是同机传输的脾气：一个在这个传输上能用的客户端，换个传输也得能用。
 // 各实现各一套校验，等于让「什么是合法的牌桌码」有两个答案。
 func TestBadTableCodeIsRejected(t *testing.T) {
-	bad := []string{"", "abc", "ABCDE1", "../etc", "AB/DEF", "ABCDE\n", "ABCDEFG"}
+	bad := []string{"", "abc", "../etc", "AB/DEF", "AB\\DEF", "A.CDEF", "AB CDE", "ABCDE\n", "ABCDEFG"}
 	eachTransport(t, func(t *testing.T, tr Transport) {
 		for _, code := range bad {
 			if ln, err := tr.Listen(code); err == nil {
