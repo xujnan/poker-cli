@@ -51,6 +51,9 @@ type view interface {
 	notice(s string)
 	// refresh 在处理完用户输入之后调，让需要重画的那一版有机会重画。
 	refresh()
+	// tick 每秒调一次，给屏幕上会自己走的东西（倒计时）一个走的机会。
+	// 对滚动输出那两版是空操作——它们没有会自己变的东西。
+	tick()
 	// disconnected 表示连接断了，事件流到此为止。
 	disconnected()
 }
@@ -82,6 +85,7 @@ func (v *textView) event(ev poker.Event, _ []byte) error {
 func (v *textView) typed()          {}
 func (v *textView) notice(s string) { fmt.Fprintln(v.out, s) }
 func (v *textView) refresh()        {}
+func (v *textView) tick()           {}
 func (v *textView) disconnected()   { fmt.Fprintln(v.out, "与牌桌的连接已断开。") }
 
 // jsonlView 把服务端说的话原样吐出去。
@@ -100,4 +104,5 @@ func (v *jsonlView) event(_ poker.Event, raw []byte) error {
 func (v *jsonlView) typed()          {}
 func (v *jsonlView) notice(s string) { fmt.Fprintln(v.out, s) }
 func (v *jsonlView) refresh()        {}
+func (v *jsonlView) tick()           {}
 func (v *jsonlView) disconnected()   {}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/xujnan/poker-cli/internal/poker"
 	"github.com/xujnan/poker-cli/internal/textui"
@@ -41,11 +42,18 @@ const (
 	// 空行让几块内容分得开，读起来松快，但它是奢侈品：屏幕矮的时候这几行该让给
 	// 真正的内容——一屏只剩八行还拿三行画空白，那是好看压过了好用。
 	roomyHeight = 18
+	// prevHandLines 是上一手留几行。留的是结尾——摊牌和分池在那儿，
+	// 而「谁赢了多少」正是屏幕一清就看不见的那件事。
+	prevHandLines = 4
 	// minLogLines 是再挤也要留几条流水。
 	//
 	// 终端矮到连这几条都放不下时，宁可让它滚一下，也不能把「刚才发生了什么」删干净——
 	// 那时屏幕上只剩一个静止的局面，人根本不知道牌是怎么走到这儿的。
 	minLogLines = 2
+
+	// actingMark 是「牌桌在等这个人」。座位表和流水末尾共用一个写法：
+	// 同一件事在屏幕上有两处落点，写法一分岔，看的人就得先认出它们是一回事。
+	actingMark = "行动中…"
 )
 
 // liveView 把「这一手正在发生什么」画成固定的一屏，就地重画，而不是往下滚（ADR-0017）。
@@ -68,11 +76,27 @@ type liveView struct {
 	hole   []poker.Card
 	log    []string
 
+	// prev 是上一手牌的结尾几行，prevHand 是它的手数。
+	//
+	// 只留一手，而且留在重画区里——屏幕因此不会越长越高。留全部的话，实时帧
+	// 就退化成了滚动流水账，而那正是这一版要避开的东西（ADR-0017）；
+	// 想看全部有两条现成的路：--format=text，和手牌历史文件。
+	prev     []string
+	prevHand int
+
 	// acting 是牌桌此刻在等谁行动，空串表示没人在行动。
 	//
 	// 这是服务端广播的 turn 事件告诉我们的，不是自己按座位顺序推出来的——
 	// 客户端一旦开始自己算轮次，就会和服务端算出分歧（ADR-0003）。
 	acting string
+	// timeout 是这张桌一次行动的时限，deadline 是当前这个人的钟什么时候走完。
+	// timeout 为 0（开桌时 --timeout 0）表示不限时，那就没有倒计时可画。
+	timeout  time.Duration
+	deadline time.Time
+	// now 是这一版唯一的时间来源，测试里换成一个假钟。
+	// 倒计时是屏幕上第一个「不靠事件推进」的东西，它必须能被断言，
+	// 否则「倒计时会不会在不该重来的时候重来」这种错只能靠手看。
+	now func() time.Time
 	// turn 非空表示正轮到我，里面是服务端给的那份快照。
 	turn *poker.Snapshot
 	// note 是最近一条要提醒的话（错误、帮助之类），显示到下一条事件为止。
@@ -82,10 +106,12 @@ type liveView struct {
 
 	// up 是下一帧重画前要把光标往上挪几行。
 	up int
+	// shown 是屏幕上那一帧的每一行，repaint 拿它比出哪几行真变了。
+	shown []string
 }
 
 func newLiveView(out io.Writer, me string) *liveView {
-	return &liveView{out: out, me: me}
+	return &liveView{out: out, me: me, now: time.Now}
 }
 
 // spacer 是块与块之间的那个空行，屏幕不够高时它什么都不占。
@@ -102,13 +128,24 @@ func (v *liveView) start() { v.render() }
 
 func (v *liveView) event(ev poker.Event, _ []byte) error {
 	v.apply(ev)
-	v.render()
+	// 事件也走这条路：别人行动时你正在打字，帧高没变的话就没必要把你打的字冲掉。
+	// 帧高一变（多了一条流水，通常如此）它自己会退回整帧重画。
+	v.repaint()
 	return nil
 }
 
 func (v *liveView) notice(s string) { v.note = s }
 
 func (v *liveView) refresh() { v.render() }
+
+// tick 是秒针。只有屏幕上真有一个在走的数字时才重画——没有的话，
+// 每秒一帧纯属往终端里灌字节，而对着管道时那还是一堆转义序列。
+func (v *liveView) tick() {
+	if v.deadline.IsZero() || v.acting == "" || v.acting == v.me || v.gone {
+		return
+	}
+	v.repaint()
+}
 
 func (v *liveView) disconnected() {
 	v.gone, v.turn = true, nil
@@ -134,20 +171,24 @@ func (v *liveView) apply(ev poker.Event) {
 	}
 
 	switch ev.Type {
+	case poker.EventTable:
+		v.timeout = time.Duration(ev.TimeoutMS) * time.Millisecond
 	case poker.EventHandStart:
-		// 先把刚打完那一手永久留在终端上，再清屏开新的一手。
-		v.commit()
-		// 新的一手，把上一手的东西全清掉——这正是「只展示正在玩的」那句话的落点。
+		// 把刚打完那一手的结尾留一份，其余清掉——这正是「只展示正在玩的」那句话的落点。
+		v.prev, v.prevHand = tailOf(v.log, prevHandLines), v.hand
 		// 底池也在内：hand_start 不带底池，不清的话上一手的数字会一直挂着，
 		// 直到第一个盲注把它盖掉，中间那几帧是在说谎。
 		v.hand, v.street = ev.Hand, "preflop"
 		v.board, v.hole, v.log = nil, nil, nil
 		v.turn, v.over, v.note = nil, false, ""
-		v.acting = ""
+		v.acting, v.deadline = "", time.Time{}
 		v.pot = 0
 		if ev.Pot != nil {
 			v.pot = *ev.Pot
 		}
+		// 翻牌前也来一条分隔线。四条街只有它没有的话，盲注和动作就直接贴在
+		// 上一手的记录底下，一眼看不出这手牌是从哪儿开始的。
+		v.addLog("%s", v.streetRule(streetName("preflop"), nil))
 	case poker.EventBlind:
 		name := "小盲"
 		if ev.Action == "big_blind" {
@@ -162,6 +203,15 @@ func (v *liveView) apply(ev poker.Event) {
 			v.hole = ev.Cards
 		}
 	case poker.EventTurn:
+		// 只有换人了才重新计时。同一个人的 turn 会再来一遍——他发了个非法动作，
+		// 服务端把合法动作表重新告诉他一次。而服务端那边的钟在这种时候是不重置的
+		// （不然一个只会发非法动作的客户端就能无限拖下去），屏幕得跟它说同一件事。
+		if ev.Player != v.acting {
+			v.deadline = time.Time{}
+			if v.timeout > 0 {
+				v.deadline = v.now().Add(v.timeout)
+			}
+		}
 		v.acting = ev.Player
 	case poker.EventYourTurn:
 		v.turn = ev.Snapshot
@@ -174,7 +224,7 @@ func (v *liveView) apply(ev poker.Event) {
 		}
 	case poker.EventAction:
 		// 他动过了，牌桌不再等他。下一条 turn 会说出在等谁。
-		v.turn, v.acting = nil, ""
+		v.turn, v.acting, v.deadline = nil, "", time.Time{}
 		v.addLog("%s", logLine(v.who(ev.Player), actionWhat(ev), actionPot(ev)))
 		v.patchSeat(ev)
 	case poker.EventStreet:
@@ -193,7 +243,7 @@ func (v *liveView) apply(ev poker.Event) {
 			v.addLog("%s %d → %s", label, pot.Amount, strings.Join(pot.Winners, "、"))
 		}
 	case poker.EventHandEnd:
-		v.over, v.turn, v.acting = true, nil, ""
+		v.over, v.turn, v.acting, v.deadline = true, nil, "", time.Time{}
 	case poker.EventError:
 		v.note = fmt.Sprintf("✗ [%s] %s", ev.Code, ev.Message)
 	case poker.EventJoined, poker.EventLeft, poker.EventSitOut, poker.EventSitIn, poker.EventTopUp:
@@ -256,7 +306,13 @@ func logLine(who, what, pot string) string {
 //
 // 宽度要看终端：画过头了会折行，而折了一行，「上移 N 行」就再也对不上了。
 func (v *liveView) streetRule(name string, dealt []poker.Card) string {
-	lead, label := "────", fmt.Sprintf(" %s %s ", name, textui.Cards(dealt))
+	// 翻牌前没有新牌翻开，那就别画一个占位的短横——「──── 翻牌前 - ────」
+	// 里那个横杠会让人以为牌面上有什么东西。
+	label := fmt.Sprintf(" %s ", name)
+	if len(dealt) > 0 {
+		label = fmt.Sprintf(" %s %s ", name, textui.Cards(dealt))
+	}
+	lead := "────"
 	width := streetRuleWidth
 	// 减 2 是 frame 给每条流水加的那两格缩进。
 	if c := textui.Cols(v.out) - 2; c > 0 && c < width {
@@ -289,46 +345,6 @@ func (v *liveView) typed() {
 	}
 }
 
-// commit 把刚打完那一手永久地留在终端上，之后的重画从它下面重新开始。
-//
-// 「只展示正在玩的」（ADR-0017）说的是**正在动的那一帧**，不是说打完就得抹掉。
-// 这两件事靠这个函数分开：一手结束时，把它的记录当普通输出打一次——那几行从此
-// 归终端的回滚缓冲管，往上翻就能看见；然后把上移行数归零，新的一手在它下面重新开帧。
-//
-// 归零这一步是关键。不归零的话，下一帧会往上挪到刚刚留下的记录里去改写它，
-// 那就既没保住记录，也把屏幕搅乱了。
-func (v *liveView) commit() {
-	if v.hand == 0 || len(v.log) == 0 {
-		return
-	}
-	var b strings.Builder
-	if v.up > 0 {
-		fmt.Fprintf(&b, "\033[%dA", v.up)
-	}
-	b.WriteString("\r\033[J")
-	b.WriteString(v.record())
-	fmt.Fprint(v.out, b.String())
-	v.up = 0
-}
-
-// record 是留在终端上的那份「上一手」：标题加全部流水。
-//
-// 不留座位表和公共牌：它们在流水里已经有了（街分隔线带着牌面，底池跟在每个动作后面），
-// 而座位表是「此刻各家多少筹码」——那是给正在打的那手用的，留在历史里只会让人误读。
-func (v *liveView) record() string {
-	var b strings.Builder
-	head := fmt.Sprintf("第 %d 手", v.hand)
-	if v.blinds != "" {
-		head += "  盲注 " + v.blinds
-	}
-	fmt.Fprintf(&b, "%s\n", textui.Bold(head))
-	for _, l := range v.log {
-		fmt.Fprintf(&b, "  %s\n", l)
-	}
-	b.WriteString("\n")
-	return b.String()
-}
-
 // render 就地重画一帧。
 func (v *liveView) render() {
 	frame := v.frame()
@@ -340,6 +356,52 @@ func (v *liveView) render() {
 	b.WriteString(frame)
 	fmt.Fprint(v.out, b.String())
 	v.up = strings.Count(frame, "\n")
+	v.shown = strings.Split(frame, "\n")
+}
+
+// repaint 只重写变了的那几行，不碰输入行。
+//
+// 整帧重画会连带抹掉终端刚回显出来的半行命令——你正在敲的东西就这么没了。
+// 以前这只在别人行动时偶尔发生一次，倒计时进来之后变成了每秒一次，不能再将就。
+// 所以这条路先把光标存起来（它此刻停在输入行上，列数只有终端自己知道），
+// 挪上去把变了的那几行重写一遍，再放回原处：输入行一个字节都没动过。
+//
+// 只在帧高没变时走得通——变了的话下面的行要整体挪位置，那是整帧重画的活。
+// 另一个前提是光标确实停在最后一行上：敲的字多到把输入行挤到换行时就不成立了，
+// 那时候这一帧会画歪，等下一条事件整帧重画才正过来。`typed` 数行数时是同一个假设。
+func (v *liveView) repaint() {
+	if v.up == 0 || v.shown == nil {
+		v.render()
+		return
+	}
+	next := strings.Split(v.frame(), "\n")
+	if len(next) != len(v.shown) {
+		v.render()
+		return
+	}
+
+	var b strings.Builder
+	b.WriteString("\0337") // 存光标
+	row, moved := len(next)-1, false
+	for i, l := range next {
+		if l == v.shown[i] {
+			continue
+		}
+		if d := row - i; d > 0 {
+			fmt.Fprintf(&b, "\033[%dA", d)
+		} else if d < 0 {
+			fmt.Fprintf(&b, "\033[%dB", -d)
+		}
+		row, moved = i, true
+		// \033[K 清到行尾：新的一行比旧的短时，旧的尾巴不能留在那儿。
+		fmt.Fprintf(&b, "\r%s\033[K", l)
+	}
+	if !moved {
+		return
+	}
+	b.WriteString("\0338") // 放回去
+	fmt.Fprint(v.out, b.String())
+	v.shown = next
 }
 
 // frame 画出当前这一帧。最后一行是输入提示，不换行——光标就停在它后面。
@@ -348,20 +410,68 @@ func (v *liveView) render() {
 // 原来那个位置，屏幕会一路烂下去。以前靠一个拍脑袋的常数压着，现在直接问终端多高，
 // 把除流水之外的部分先排好，剩下几行就显示几条流水。
 func (v *liveView) frame() string {
+	prev := v.prevBlock()
 	head, fixed := v.headAndSeats(), v.tail()
-	budget := v.logBudget(strings.Count(head, "\n") + strings.Count(fixed, "\n"))
+	budget := v.logBudget(strings.Count(head, "\n") + strings.Count(fixed, "\n") + strings.Count(prev, "\n"))
 
 	log := v.log
+	// 牌桌在等谁，也排进流水的末尾。座位表上那个标记要先找到他在哪一行才看得见，
+	// 而眼睛在等的时候盯的是流水最后一行——下一条记录会从哪儿冒出来。
+	if pending := v.pendingRow(); pending != "" {
+		log = append(append([]string(nil), log...), pending)
+	}
 	if len(log) > budget {
 		log = log[len(log)-budget:]
 	}
 	var b strings.Builder
+	b.WriteString(prev)
 	b.WriteString(head)
 	for _, l := range log {
 		fmt.Fprintf(&b, "  %s\n", l)
 	}
 	b.WriteString(fixed)
 	return b.String()
+}
+
+// shortDur 把时限写成人话：30s、1m30s、500ms。
+func shortDur(d time.Duration) string {
+	if d >= time.Second && d%time.Second == 0 {
+		return d.String()
+	}
+	return d.Round(time.Millisecond).String()
+}
+
+// actingLabel 是「行动中…」，后面跟上这个人还剩多少时间。
+//
+// 倒计时只画给别人。轮到自己时屏幕不会每秒重画——重画会把终端刚回显出来的
+// 那半行命令抹掉，而你正在敲它。那时候画一个不动的数字比不画更糟：它看着像
+// 在走，其实停在你开始打字的那一刻（还剩多少时间改由 tail 那行静态地说）。
+func (v *liveView) actingLabel() string {
+	if v.deadline.IsZero() || v.acting == v.me {
+		return actingMark
+	}
+	left := v.deadline.Sub(v.now())
+	if left < 0 {
+		left = 0
+	}
+	// 向上取整：还剩 0.2 秒时显示 1s，走到 0 才是 0s。显示 0s 却还能动，
+	// 比显示 1s 却已经代打了要好解释。
+	return fmt.Sprintf("%s %ds", actingMark, (left.Milliseconds()+999)/1000)
+}
+
+// pendingRow 是流水末尾那一行：牌桌在等谁。
+//
+// 它跟上面那些不是一回事——上面每一行都是已经发生的事，这一行是还没发生的。
+// 所以整行调暗：位置在流水里，分量不在。调暗也只能整行来，这一行没有别的样式，
+// 不会撞上「牌带颜色，包一层就被牌尾那个复位打断」那个坑。
+//
+// 它不进 v.log。流水是这手牌的记录，而「在等谁」下一条事件就翻篇了；
+// 混进去的话，上一手留下的结尾会以「轮到某某」收尾，那是一句永远不会兑现的话。
+func (v *liveView) pendingRow() string {
+	if v.acting == "" {
+		return ""
+	}
+	return textui.Dim(logLine(v.who(v.acting), v.actingLabel(), ""))
 }
 
 // logBudget 算出这一帧还能放几条流水。fixed 是除流水外已经占掉的行数。
@@ -381,6 +491,31 @@ func (v *liveView) logBudget(fixed int) int {
 		return n
 	}
 	return minLogLines
+}
+
+// prevBlock 是屏幕最上面那一小块：上一手的结尾。
+//
+// 一手打完到下一手开始只隔 --hand-delay，屏幕一清，「谁赢了这个底池」就没了。
+// 留结尾而不是留开头：摊牌和分池在结尾，而那才是你回头想看的东西。
+func (v *liveView) prevBlock() string {
+	if len(v.prev) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n", textui.Dim(fmt.Sprintf("上一手（第 %d 手）", v.prevHand)))
+	for _, l := range v.prev {
+		fmt.Fprintf(&b, "  %s\n", l)
+	}
+	b.WriteString(v.spacer())
+	return b.String()
+}
+
+// tailOf 取一个切片的最后 n 项。
+func tailOf(xs []string, n int) []string {
+	if len(xs) <= n {
+		return append([]string(nil), xs...)
+	}
+	return append([]string(nil), xs[len(xs)-n:]...)
 }
 
 func (v *liveView) headAndSeats() string {
@@ -418,8 +553,10 @@ func (v *liveView) headAndSeats() string {
 		if s.Player == v.me && len(v.hole) > 0 {
 			line += "   " + textui.Cards(v.hole)
 		}
-		if s.Player == v.acting {
-			line += "   行动中…"
+		// ▶ 已经在这一行说过同一件事了。同一行标两遍不会更醒目，只是把
+		// 本来就挤的一行又撑宽一截——而这一行还要塞位置、筹码、投入和底牌。
+		if s.Player == v.acting && marker != "▶ " {
+			line += "   " + v.actingLabel()
 		}
 		fmt.Fprintf(&b, "%s\n", line)
 	}
@@ -445,7 +582,13 @@ func (v *liveView) tail() string {
 		b.WriteString("与牌桌的连接已断开。\n")
 		return b.String()
 	case v.turn != nil:
-		fmt.Fprintf(&b, "%s\n%s\n", textui.Bold("轮到你了"+toCallSuffix(v.turn)), legalLine(v.turn))
+		// 轮到自己时只说时限，不说还剩多少——这一屏在你打字的时候不重画，
+		// 一个不会走的「还剩 12 秒」会一直停在 12 秒上。
+		head := "轮到你了" + toCallSuffix(v.turn)
+		if v.timeout > 0 {
+			head += fmt.Sprintf("    限时 %s", shortDur(v.timeout))
+		}
+		fmt.Fprintf(&b, "%s\n%s\n", textui.Bold(head), legalLine(v.turn))
 	case v.over:
 		b.WriteString("这手牌结束了，等下一手…\n")
 	}

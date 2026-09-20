@@ -50,15 +50,33 @@ func (a Action) String() string {
 	return a.Kind.String()
 }
 
-// ParseAction 解析 "fold"、"call"、"bet 100" 这样的输入。
+// actionAliases 是人在终端里敲的单字母快捷输入。
 //
-// 不认单字母别名（ADR-0005）：打错一个字母就弃牌是不可逆的灾难。
+// 只有这里认别名。JSON 线路上的动作走 protocol.Command.Action()，那是另一个
+// switch，每个动作永远只有一种拼法——写 agent 的人不必知道别名存在，也不会
+// 收到两种写法要分别处理（ADR-0005 修订）。
+//
+// k 是 check、c 是 call，跟牌桌上的习惯走，别按首字母想当然：两个词都以 c
+// 开头，而抢到 c 的是更常用的那个。
+var actionAliases = map[string]string{
+	"f": "fold",
+	"k": "check",
+	"c": "call",
+	"b": "bet",
+	"a": "allin",
+}
+
+// ParseAction 解析 "fold"、"call"、"bet 100" 这样的输入，也认 actionAliases 里的单字母。
 func ParseAction(s string) (Action, error) {
 	fields := strings.Fields(s)
 	if len(fields) == 0 {
 		return Action{}, fmt.Errorf("空动作")
 	}
-	switch fields[0] {
+	word := fields[0]
+	if full, ok := actionAliases[word]; ok {
+		word = full
+	}
+	switch word {
 	case "fold":
 		return Action{Kind: Fold}, requireNoArg(fields)
 	case "check":
@@ -80,7 +98,7 @@ func ParseAction(s string) (Action, error) {
 		}
 		return Action{Kind: BetTo, Amount: n}, nil
 	default:
-		return Action{}, fmt.Errorf("不认识的动作 %q，可用：fold、check、call、bet <数额>、allin", fields[0])
+		return Action{}, fmt.Errorf("不认识的动作 %q，可用：fold(f)、check(k)、call(c)、bet <数额>(b)、allin(a)", fields[0])
 	}
 }
 

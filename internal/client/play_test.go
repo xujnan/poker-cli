@@ -166,17 +166,28 @@ func TestPlayReportsBadInputWithoutSending(t *testing.T) {
 	}
 }
 
-// TestPlayLiveRendersOneFrameAtATime：重画那一版每来一条事件重画一帧，
-// 而且第一帧之后每一帧都先把光标挪回上一帧的开头。
+// TestPlayLiveRendersOneFrameAtATime：重画那一版每来一条事件更新一次屏幕，
+// 而且第一次之后每一次都先把光标挪回上一帧里去——从不往下堆。
 func TestPlayLiveRendersOneFrameAtATime(t *testing.T) {
 	s, _ := fakeTable(t, sampleLines)
 	var out bytes.Buffer
 	if err := Play(s, FormatLive, &out, nil, false); err != nil {
 		t.Fatal(err)
 	}
-	// start 一帧 + 四条事件各一帧 + 断开一帧 = 六帧，头一帧不上移。
-	if got, want := strings.Count(out.String(), "\r\033[J"), 6; got != want {
-		t.Fatalf("画了 %d 帧，期望 %d 帧：\n%q", got, want, out.String())
+	// start 一次 + 四条事件各一次 + 断开一次 = 六次。
+	// 其中帧高没变的那几次走的是「只改变了的那几行」那条路（\033[7 存光标），
+	// 帧高变了的走整帧重画（\r\033[J）——两条加起来必须正好六次，不多不少。
+	full := strings.Count(out.String(), "\r\033[J")
+	partial := strings.Count(out.String(), "\0337")
+	if got, want := full+partial, 6; got != want {
+		t.Fatalf("更新了 %d 次（整帧 %d + 局部 %d），期望 %d 次：\n%q",
+			got, full, partial, want, out.String())
+	}
+	// 局部重画绝不能清屏：清了就把用户正在敲的那半行也清掉了，而它就是为此存在的。
+	for _, part := range strings.Split(out.String(), "\0337")[1:] {
+		if end := strings.Index(part, "\0338"); end >= 0 && strings.Contains(part[:end], "\033[J") {
+			t.Fatalf("局部重画里不该有清屏：%q", part[:end])
+		}
 	}
 	if got := strings.Count(out.String(), "\033[0A"); got != 0 {
 		t.Fatalf("不该出现「上移 0 行」这种空动作：%q", out.String())
@@ -248,3 +259,52 @@ var (
 	_ view = (*jsonlView)(nil)
 	_ view = (*liveView)(nil)
 )
+
+// TestPlayAcceptsShortcuts：单字母在整条链路上走通，发出去的仍然是全拼的命令。
+//
+// 单独测 ParseAction 不够——快捷输入有一半不归它管（topup、sitout、sitin 在
+// handleLine 里分派），而那一半正是最容易和前缀切分打架的地方。
+func TestPlayAcceptsShortcuts(t *testing.T) {
+	s, cmds := fakeTable(t, sampleLines)
+	var out bytes.Buffer
+	in := strings.NewReader("c\nb 40\nt 100\nso\nsi\nk\nf\na\n")
+	if err := Play(s, FormatText, &out, in, false); err != nil {
+		t.Fatal(err)
+	}
+	got := <-cmds
+	want := []protocol.Command{
+		{Type: protocol.CmdJoin, Name: "我", Buyin: 200},
+		{Type: protocol.CmdCall},
+		{Type: protocol.CmdBet, Amount: 40},
+		{Type: protocol.CmdTopUp, Amount: 100},
+		{Type: protocol.CmdSitOut},
+		{Type: protocol.CmdSitIn},
+		{Type: protocol.CmdCheck},
+		{Type: protocol.CmdFold},
+		{Type: protocol.CmdAllIn},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("发出去 %d 条命令，期望 %d 条：%+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("第 %d 条命令是 %+v，期望 %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// TestPlayRefusesAmbiguousS：sitout 和 sitin 都以 s 开头，猜错的代价是又暂离一手，
+// 所以 s 宁可什么都不做，只把两个缩写说清楚。
+func TestPlayRefusesAmbiguousS(t *testing.T) {
+	s, cmds := fakeTable(t, sampleLines)
+	var out bytes.Buffer
+	if err := Play(s, FormatText, &out, strings.NewReader("s\n"), false); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-cmds; len(got) != 1 {
+		t.Fatalf("除了 join 不该发出任何命令，得到 %+v", got)
+	}
+	if !strings.Contains(out.String(), "s 有歧义") {
+		t.Fatalf("没说清 s 该怎么写：%q", out.String())
+	}
+}

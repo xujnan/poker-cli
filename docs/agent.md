@@ -20,14 +20,21 @@ poker serve --blinds 1/2 --hand-delay 0 --hands 1000   # 打印出 Table Code
 
 名字就是身份，没有 token 也没有握手（ADR-0009）。断线之后用同一个名字再 join，座位和筹码都还在。
 
-坐下之后收到的第一条事件是 `table`，它带着这张牌桌说的是哪一版协议，以及默认带入是多少：
+坐下之后收到的第一条事件是 `table`，它带着这张牌桌说的是哪一版协议、默认带入多少、一次行动限时多久：
 
 ```json
-{"type":"table","protocol":1,"buyin":200,"player":"agent1","players":["bot1","agent1"],
+{"type":"table","protocol":1,"buyin":200,"timeout_ms":30000,"player":"agent1",
+ "players":["bot1","agent1"],
  "seats":[{"player":"bot1","stack":200},{"player":"agent1","stack":200}],"blinds":"1/2"}
 ```
 
 `buyin` 是这张桌的默认带入——想在输光之后补回来，补到这个数就对了。
+
+`timeout_ms` 是一次行动的时限，从服务端发出 `your_turn` 起算；到点它会替你做决定
+（能过牌就过牌，否则弃牌），那一条 `action` 上带着 `forced`。想多久算多久的 agent
+要按这个数给自己设上限——被代打的那一手和你自己打的那一手在事件流里长得不一样，
+但钱是一样地输掉的。这个键不出现就表示这张桌不限时（开桌时 `--timeout 0`）。
+单位是毫秒不是秒：自对弈常开 `--timeout 500ms`，按秒取整会变成 0，而 0 的意思正好相反。
 
 **`protocol` 只在破坏兼容时加一。** 多一种事件、多一个可选字段不会动它——照着本文写的 agent 照样跑。
 改名、删字段、改语义才会。建议开头就看一眼，不认识就报错退出，而不是带着误解解析下去。
@@ -139,7 +146,11 @@ LJ   HJ   CO  从 BTN 往右数回来的三个位置，CO 紧挨着 BTN
 | `sitout` / `sitin` | | 暂离 / 回座。暂离从下一手开始生效，座位和筹码都留着 |
 | `quit` | | 离座。直接断开连接是一样的效果 |
 
-没有 `raise`——传统术语里的下注与加注在这里是同一件事，区别只在此前有没有人下过注。也没有 `f` / `c` 这类单字母别名。
+没有 `raise`——传统术语里的下注与加注在这里是同一件事，区别只在此前有没有人下过注。
+
+线路上每个动作只有一种拼法，就是上表里的那个词。人类客户端的终端里另有 `f` / `k` / `c` / `b` / `a`
+五个单字母快捷输入，但它们在人敲下回车那一刻就被翻成全拼了，永远不会出现在 JSON 里（ADR-0005）。
+你照着 `your_turn` 的 `actions` 里给的名字发就行，不必认别的写法。
 
 ## 你会收到什么
 
@@ -153,7 +164,7 @@ hand_start → blind × 2 → hole_cards → [turn + your_turn ⇄ action]…
 
 | 事件 | 什么时候来 | 关键字段 |
 | --- | --- | --- |
-| `table` | 你刚加入，只发给你 | `protocol`、`buyin`（这张桌的默认带入）、`players`、`seats`、`blinds` |
+| `table` | 你刚加入，只发给你 | `protocol`、`buyin`（这张桌的默认带入）、`timeout_ms`（一次行动的时限，不出现表示不限时）、`players`、`seats`、`blinds` |
 | `joined` / `left` | 有人来了 / 走了 | `player`、`seats` |
 | `sit_out` / `sit_in` | 有人暂离 / 回座 | `player`、`message`（暂离的原因） |
 | `top_up` | 有人补码到账 | `player`、`amount`、`stack` |

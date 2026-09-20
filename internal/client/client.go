@@ -12,6 +12,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/xujnan/poker-cli/internal/poker"
 	"github.com/xujnan/poker-cli/internal/protocol"
@@ -104,10 +105,18 @@ func Play(s *Session, format string, out io.Writer, in io.Reader, rebuy bool) er
 		}()
 	}
 
+	// 秒针。屏幕上唯一不靠事件推进的东西是行动倒计时，它得有人推一把。
+	// 挂在主循环上而不是另起一个 goroutine：呈现必须一次一件，两路并发地往
+	// 终端里写，「上一帧有多少行」就再也数不准了。
+	sec := time.NewTicker(time.Second)
+	defer sec.Stop()
+
 	buy := rebuyer{name: s.Name(), enabled: rebuy, target: s.Buyin()}
 	v.start()
 	for {
 		select {
+		case <-sec.C:
+			v.tick()
 		case m := <-events:
 			if m.err != nil {
 				if errors.Is(m.err, io.EOF) || errors.Is(m.err, net.ErrClosed) {
@@ -151,25 +160,33 @@ type eventMsg struct {
 // net.ErrClosed，走和对面挂掉完全一样的收尾。两条退出路径合成一条，少一处能分岔的地方。
 func handleLine(s *Session, v view, line string) {
 	line = strings.TrimSpace(line)
-	switch line {
-	case "":
+	if line == "" {
 		return
-	case "quit", "exit":
+	}
+	// 先切出第一个词再分派。别名进来之后前缀匹配会打架——"t" 是 topup 的缩写，
+	// 而 "topup 200" 也以 t 开头，按前缀切就把 "opup 200" 当成数额了。
+	word, rest, _ := strings.Cut(line, " ")
+	rest = strings.TrimSpace(rest)
+	switch word {
+	case "quit", "exit", "q":
 		_ = s.Send(protocol.Command{Type: protocol.CmdQuit})
 		_ = s.Close()
 		return
-	case "help":
+	case "help", "h":
 		v.notice(helpText)
 		return
-	case "sitout":
+	case "sitout", "so":
 		send(s, v, protocol.Command{Type: protocol.CmdSitOut})
 		return
-	case "sitin":
+	case "sitin", "si":
 		send(s, v, protocol.Command{Type: protocol.CmdSitIn})
 		return
-	}
-	if rest, ok := strings.CutPrefix(line, "topup"); ok {
-		amount, err := strconv.Atoi(strings.TrimSpace(rest))
+	case "s":
+		// 这两个词都以 s 开头，且猜错的代价是「本来想回座，结果又暂离了一手」。
+		v.notice("s 有歧义：暂离是 sitout（缩写 so），回座是 sitin（缩写 si）")
+		return
+	case "topup", "t":
+		amount, err := strconv.Atoi(rest)
 		if err != nil || amount <= 0 {
 			v.notice("topup 要跟一个正数额，比如 topup 200")
 			return
@@ -191,16 +208,16 @@ func send(s *Session, v view, cmd protocol.Command) {
 	}
 }
 
-const helpText = `可用命令：
-  fold          弃牌
-  check         过牌
-  call          跟注
-  bet <数额>    把本轮总投入推到这个数（不是「再加」这么多）
-  allin         推光
-  topup <数额>  补码。随时能发，下一手牌开始前到账
-  sitout        暂离，这手牌打完生效；座位和筹码都留着
-  sitin         回座
-  help / quit`
+const helpText = `可用命令（括号里是快捷输入）：
+  fold (f)        弃牌
+  check (k)       过牌
+  call (c)        跟注
+  bet <数额> (b)  把本轮总投入推到这个数（不是「再加」这么多）
+  allin (a)       推光
+  topup <数额> (t)  补码。随时能发，下一手牌开始前到账
+  sitout (so)     暂离，这手牌打完生效；座位和筹码都留着
+  sitin (si)      回座
+  help (h) / quit (q)`
 
 // RunBot 跑一个机器人客户端。
 //

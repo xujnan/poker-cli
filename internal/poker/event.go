@@ -93,6 +93,11 @@ type Event struct {
 	// 客户端要它是为了知道「补码该补到多少」。没有它的话只能猜——而唯一能猜的
 	// 「第一次看见自己有多少筹码」，在输光之后重连时恰好是 0，于是永远补不上。
 	Buyin int `json:"buyin,omitempty"`
+	// TimeoutMS 只出现在 table 事件上，是一次行动的时限（毫秒），0 表示不限时。
+	//
+	// 单位是毫秒不是秒：自对弈常开 --timeout 500ms，按秒取整就成了 0，
+	// 而 0 在这里的意思是「不限时」——刚好把最紧的那张桌说成最松的。
+	TimeoutMS int `json:"timeout_ms,omitempty"`
 
 	// Pot 用指针是为了让「底池为 0」能如实出现，而不是被 omitempty 吃掉。
 	Pot  *int  `json:"pot,omitempty"`

@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/creack/pty"
 
@@ -32,6 +33,20 @@ func seatRows(frame string) []string {
 		out = append(out, l)
 	}
 	return out
+}
+
+// currentBlock 从一帧里取出「正在打的这一手」那部分，把上一手那一小块甩掉。
+//
+// 两块长得像但说的是两回事：上面那块是已经打完的，留着就是给人回头看的；
+// 下面这块是正在动的，它里面混进上一手的任何东西都是 bug。断言必须分开。
+func currentBlock(frame string) string {
+	lines := strings.Split(frame, "\n")
+	for i, l := range lines {
+		if strings.HasPrefix(l, "第 ") {
+			return strings.Join(lines[i:], "\n")
+		}
+	}
+	return frame
 }
 
 // feedRender 走真正那条路：并进状态之后重画一帧。
@@ -67,6 +82,19 @@ func handOne() []poker.Event {
 	}
 }
 
+// myTurn 是「轮到我了」那条事件：快照带着整桌，因为视图收到它时会整表覆盖。
+func myTurn() poker.Event {
+	return poker.Event{Type: poker.EventYourTurn, Snapshot: &poker.Snapshot{
+		Street: "flop", Pot: 6, Community: poker.MustParseCards("2c 7h 9s"),
+		Hole: poker.MustParseCards("As Kd"),
+		Seats: []poker.SeatView{
+			{Player: "我", Stack: 198, Position: "BTN"},
+			{Player: "bot1", Stack: 199, Position: "SB"},
+			{Player: "bot2", Stack: 198, Position: "BB"},
+		},
+	}}
+}
+
 // TestLiveViewShowsOnlyTheHandInProgress 是这一版视图存在的全部理由。
 //
 // 新的一手开始时，上一手的公共牌、流水、底池必须干净地消失——否则「只展示正在玩的」
@@ -84,10 +112,12 @@ func TestLiveViewShowsOnlyTheHandInProgress(t *testing.T) {
 		{Player: "我", Stack: 198, Position: "SB"},
 	}})
 
-	got := v.frame()
-	for _, stale := range []string{"2♣", "7♥", "9♠", "A♠", "K♦", "跟注", "小盲", "底池"} {
+	// 正在打的那一块必须干净。上一手的结尾另有一块专门留着（见
+	// TestPreviousHandStaysOnScreen），那块里有这些是应该的。
+	got := currentBlock(v.frame())
+	for _, stale := range []string{"2♣", "7♥", "9♠", "A♠", "K♦", "跟注", "底池"} {
 		if strings.Contains(got, stale) {
-			t.Fatalf("第 2 手的帧里还留着上一手的 %q:\n%s", stale, got)
+			t.Fatalf("第 2 手这一块里还留着上一手的 %q:\n%s", stale, got)
 		}
 	}
 	if !strings.Contains(got, "第 2 手") {
@@ -401,6 +431,21 @@ func TestStreetRuleShrinksWithTheTerminal(t *testing.T) {
 	}
 }
 
+// actionRows 从流水里挑出动作行，丢掉街分隔线。
+//
+// 分隔线是横跨整行的一条线，本来就不分列——把它混进对齐检查里，量的就不是
+// 「动作有没有排成列」了。
+func actionRows(log []string) []string {
+	var out []string
+	for _, l := range log {
+		if strings.Contains(l, "────") {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
 // colOf 返回 sub 在这一行里从第几**显示列**开始；找不到返回 -1。
 func colOf(line, sub string) int {
 	i := strings.Index(line, sub)
@@ -440,7 +485,7 @@ func TestLogColumnsLineUp(t *testing.T) {
 	}
 
 	// 动作全都从同一列开始。
-	for _, l := range v.log {
+	for _, l := range actionRows(v.log) {
 		var at int
 		for _, verb := range []string{"小盲", "大盲", "下注到", "弃牌"} {
 			if c := colOf(l, verb); c >= 0 {
@@ -540,7 +585,8 @@ func TestLogPotColumnLinesUp(t *testing.T) {
 		poker.Event{Type: poker.EventAction, Player: "ee", Action: "allin", Amount: 30, Committed: 30, Stack: ptr(0), Pot: ptr(46)},
 	)
 	want := -1
-	for _, l := range v.log {
+	rows := actionRows(v.log)
+	for _, l := range rows {
 		at := strings.Index(l, "底池")
 		if at < 0 {
 			t.Fatalf("这一行该有底池那一列：%q", l)
@@ -550,7 +596,7 @@ func TestLogPotColumnLinesUp(t *testing.T) {
 			want = col
 		}
 		// 全下那一行的动作超宽，允许它把底池往右顶——宁可歪一行，也不能把话切一半。
-		if l == v.log[len(v.log)-1] {
+		if l == rows[len(rows)-1] {
 			if col <= want {
 				t.Fatalf("超宽的动作该把底池顶出去：%q", l)
 			}
@@ -591,40 +637,379 @@ func TestActingPlayerIsMarked(t *testing.T) {
 	}
 }
 
-// TestFinishedHandIsKeptInScrollback：打完的一手留在终端上，新的一手在它下面重新开。
+// TestPreviousHandStaysOnScreen：上一手的结尾留在屏幕上，再往前的不留。
 //
-// ADR-0017 那句「只展示正在玩的」说的是**正在动的那一帧**，不是打完就抹掉。
-// 两件事在这里分开：记录作为普通输出打一次，从此归终端的回滚缓冲管；
-// 实时帧的上移行数归零，于是它在记录下面重新开始，不会回头把记录改写掉。
-func TestFinishedHandIsKeptInScrollback(t *testing.T) {
-	var out strings.Builder
-	v := newLiveView(&out, "我")
-	feedRender(v, handOne()...)
-
-	out.Reset()
-	feedRender(v,
+// 一手打完到下一手开始只隔 --hand-delay，屏幕一清，「谁赢了这个底池」就没了。
+// 但也只留一手：留全部的话实时帧就退化成滚动流水账，而那正是这一版要避开的
+// 东西（ADR-0017）。想看全部有 --format=text 和手牌历史文件两条现成的路。
+func TestPreviousHandStaysOnScreen(t *testing.T) {
+	v := newLiveView(&strings.Builder{}, "我")
+	feed(v, handOne()...)
+	feed(v,
+		poker.Event{Type: poker.EventPotAwarded, Pots: []poker.Pot{{Amount: 6, Winners: []string{"bot1"}}}},
 		poker.Event{Type: poker.EventHandEnd, Hand: 1, Pot: ptr(6)},
 		poker.Event{Type: poker.EventHandStart, Hand: 2, Blinds: "1/2", Seats: []poker.SeatView{
 			{Player: "我", Stack: 198, Position: "SB"},
 		}})
-	got := out.String()
 
-	// 上一手的流水被永久打了出去。
-	for _, want := range []string{"第 1 手", "小盲 1", "翻牌"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("上一手的记录里该有 %q：\n%q", want, got)
+	got := v.frame()
+	if !strings.Contains(got, "上一手（第 1 手）") {
+		t.Fatalf("该留着上一手：\n%s", got)
+	}
+	if !strings.Contains(got, "底池 6 → bot1") {
+		t.Fatalf("留的该是结尾——谁赢了多少：\n%s", got)
+	}
+
+	// 再开一手，留的就该换成第 2 手，第 1 手不再占地方。
+	feed(v,
+		poker.Event{Type: poker.EventBlind, Player: "我", Action: "small_blind", Amount: 1},
+		poker.Event{Type: poker.EventPotAwarded, Pots: []poker.Pot{{Amount: 3, Winners: []string{"我"}}}},
+		poker.Event{Type: poker.EventHandEnd, Hand: 2, Pot: ptr(3)},
+		poker.Event{Type: poker.EventHandStart, Hand: 3, Blinds: "1/2", Seats: []poker.SeatView{
+			{Player: "我", Stack: 201, Position: "BB"},
+		}})
+	got = v.frame()
+	if !strings.Contains(got, "上一手（第 2 手）") {
+		t.Fatalf("该换成上一手是第 2 手了：\n%s", got)
+	}
+	if strings.Contains(got, "第 1 手") || strings.Contains(got, "底池 6 → bot1") {
+		t.Fatalf("再往前那手不该还占着地方：\n%s", got)
+	}
+	// 留的行数有上限，屏幕不会因为上一手打得长就被挤掉。
+	if n := strings.Count(v.prevBlock(), "\n"); n > prevHandLines+2 {
+		t.Fatalf("上一手那一块有 %d 行，太多了：\n%s", n, v.prevBlock())
+	}
+}
+
+// TestPreflopHasItsOwnRule：四条街都该有分隔线，翻牌前也不例外。
+//
+// 只有它没有的话，盲注和动作直接贴在上一手的记录底下，一眼看不出这手牌从哪儿开始。
+func TestPreflopHasItsOwnRule(t *testing.T) {
+	v := newLiveView(&strings.Builder{}, "我")
+	feed(v, handOne()...)
+	if len(v.log) == 0 || !strings.HasPrefix(v.log[0], "────") || !strings.Contains(v.log[0], "翻牌前") {
+		t.Fatalf("这一手的第一条流水该是翻牌前那条分隔线：%v", v.log)
+	}
+	// 翻牌前没有新牌翻开，就别画那个占位的短横——它会让人以为牌面上有东西。
+	if strings.Contains(v.log[0], "-") {
+		t.Fatalf("翻牌前那条不该有占位的短横：%q", v.log[0])
+	}
+}
+
+// TestPendingRowClosesTheLog：流水末尾也要说出牌桌在等谁。
+//
+// 座位表上那个标记得先找到他在哪一行才看得见；而在等的时候眼睛盯的是流水最后
+// 一行——下一条记录会从那儿冒出来。这一行就是在那个位置上回答「还差谁」。
+func TestPendingRowClosesTheLog(t *testing.T) {
+	v := newLiveView(&strings.Builder{}, "我")
+	feed(v, handOne()...)
+	feed(v, poker.Event{Type: poker.EventTurn, Player: "bot1"})
+
+	rows := logRows(v.frame())
+	if len(rows) == 0 {
+		t.Fatal("流水是空的")
+	}
+	last := rows[len(rows)-1]
+	if !strings.Contains(last, "bot1") || !strings.Contains(last, "行动中") {
+		t.Fatalf("流水最后一行该是「bot1 行动中…」：%q\n%s", last, v.frame())
+	}
+	// 只能有这一行在等：每多一个都是在说牌桌同时等着两个人。
+	var waiting int
+	for _, l := range rows {
+		if strings.Contains(l, "行动中") {
+			waiting++
 		}
 	}
-	// 而新的一帧必须从记录**下面**开始画：commit 之后那一次重画不许再往回挪，
-	// 挪了就会爬上去把刚留下的记录改写掉——那是既没保住记录、又搅乱了屏幕。
-	if last := strings.LastIndex(got, "\r\033[J"); last > 0 && got[last-1] == 'A' {
-		t.Fatalf("commit 之后那一帧又往回挪了，会把刚留下的记录改写掉：\n%q", got)
+	if waiting != 1 {
+		t.Fatalf("流水里有 %d 行在等人，该只有 1 行：\n%s", waiting, v.frame())
 	}
-	if v.up != strings.Count(v.frame(), "\n") {
-		t.Fatalf("新帧的上移行数该等于它自己的行数，得到 %d", v.up)
+
+	// 它不是记录，所以不进 v.log——不然上一手留下的结尾会以一句永远不会
+	// 兑现的「轮到某某」收尾。
+	for _, l := range v.log {
+		if strings.Contains(l, "行动中") {
+			t.Fatalf("v.log 里不该留下这一行：%q", l)
+		}
 	}
-	// 记录归记录，正在打的那一帧还是干净的。
-	if strings.Contains(v.frame(), "第 1 手") {
-		t.Fatalf("第 2 手的帧里不该还有第 1 手：\n%s", v.frame())
+
+	// 他动完了，这一行就该换成他真做了什么。
+	feed(v, poker.Event{Type: poker.EventAction, Player: "bot1", Action: "fold", Stack: ptr(200)})
+	rows = logRows(v.frame())
+	if last := rows[len(rows)-1]; !strings.Contains(last, "弃牌") || strings.Contains(last, "行动中") {
+		t.Fatalf("动作到了，末行该变成弃牌：%q\n%s", last, v.frame())
+	}
+}
+
+// logRows 从一帧里挑出流水那几行。
+//
+// 座位行和流水行都是两格缩进加人名，光看长相分不开（这个坑踩过三次），
+// 所以按结构来：先让 seatRows 认出座位区，剩下的缩进行才是流水。
+func logRows(frame string) []string {
+	cur := currentBlock(frame)
+	seats := map[string]bool{}
+	for _, l := range seatRows(cur) {
+		seats[l] = true
+	}
+	var out []string
+	for _, l := range strings.Split(cur, "\n") {
+		if !strings.HasPrefix(l, "  ") || seats[l] {
+			continue
+		}
+		out = append(out, strings.TrimSpace(l))
+	}
+	return out
+}
+
+// TestSelfSeatSaysItOnce：轮到自己时，座位表那一行只标一次。
+//
+// ▶ 和「行动中…」说的是同一件事。一行说两遍不会更醒目，而这一行还要塞位置、
+// 筹码、本轮投入和底牌——每多一截都在把它往折行的边上推。
+func TestSelfSeatSaysItOnce(t *testing.T) {
+	v := newLiveView(&strings.Builder{}, "我")
+	feed(v, handOne()...)
+	feed(v,
+		poker.Event{Type: poker.EventTurn, Player: "我"},
+		myTurn(),
+	)
+	frame := v.frame()
+	var mine string
+	for _, l := range seatRows(frame) {
+		if strings.Contains(l, "我") {
+			mine = l
+		}
+	}
+	if !strings.HasPrefix(mine, "▶") {
+		t.Fatalf("轮到自己了，这一行该有 ▶：%q\n%s", mine, frame)
+	}
+	if strings.Contains(mine, "行动中") {
+		t.Fatalf("▶ 已经说过了，不该再跟一个行动中：%q\n%s", mine, frame)
+	}
+	// 流水末尾那一行是另一回事：它回答的是「下一条记录在等谁」，照样要有。
+	rows := logRows(frame)
+	if last := rows[len(rows)-1]; !strings.Contains(last, "行动中") {
+		t.Fatalf("流水末尾该还在等：%q\n%s", last, frame)
+	}
+}
+
+// fakeClock 是一个只在测试里被手推着走的钟。
+type fakeClock struct{ t time.Time }
+
+func (c *fakeClock) now() time.Time      { return c.t }
+func (c *fakeClock) add(d time.Duration) { c.t = c.t.Add(d) }
+
+// countdownView 造一个接好假钟、已经从 table 事件里知道时限的视图。
+func countdownView(t *testing.T, timeout time.Duration) (*liveView, *fakeClock) {
+	t.Helper()
+	clk := &fakeClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	v := newLiveView(&strings.Builder{}, "我")
+	v.now = clk.now
+	feed(v, poker.Event{Type: poker.EventTable, Player: "我", TimeoutMS: int(timeout.Milliseconds())})
+	feed(v, handOne()...)
+	return v, clk
+}
+
+// actingLine 取出标着「行动中」的那一行座位。
+func actingLine(t *testing.T, v *liveView) string {
+	t.Helper()
+	frame := v.frame()
+	for _, l := range seatRows(frame) {
+		if strings.Contains(l, "行动中") {
+			return l
+		}
+	}
+	t.Fatalf("没有哪一行在行动中：\n%s", frame)
+	return ""
+}
+
+// TestCountdownTicksDown：别人在想的时候，屏幕上那个数要跟着钟走。
+func TestCountdownTicksDown(t *testing.T) {
+	v, clk := countdownView(t, 30*time.Second)
+	feed(v, poker.Event{Type: poker.EventTurn, Player: "bot1"})
+
+	if got := actingLine(t, v); !strings.Contains(got, "行动中… 30s") {
+		t.Fatalf("刚轮到他，该是 30s：%q", got)
+	}
+	clk.add(12 * time.Second)
+	if got := actingLine(t, v); !strings.Contains(got, "行动中… 18s") {
+		t.Fatalf("过了 12 秒，该是 18s：%q", got)
+	}
+	// 向上取整：还剩一丁点也是 1s，走到 0 才是 0s。
+	clk.add(17*time.Second + 800*time.Millisecond)
+	if got := actingLine(t, v); !strings.Contains(got, "行动中… 1s") {
+		t.Fatalf("还剩 0.2 秒，该显示 1s：%q", got)
+	}
+	// 超时之后钟不会往负数走——服务端这时正在替他代打。
+	clk.add(5 * time.Second)
+	if got := actingLine(t, v); !strings.Contains(got, "行动中… 0s") {
+		t.Fatalf("已经超时，该停在 0s：%q", got)
+	}
+}
+
+// TestIllegalActionDoesNotRestartTheClock：同一个人的第二条 turn 不重新计时。
+//
+// 发了个非法动作，服务端会把合法动作表重新告诉他一次，于是又来一条 turn；
+// 但服务端那边的钟是不重置的（不然一个只会发非法动作的客户端就能无限拖下去）。
+// 屏幕要是在这儿重来一遍，它显示的时间就和真正要被代打的时刻对不上了。
+func TestIllegalActionDoesNotRestartTheClock(t *testing.T) {
+	v, clk := countdownView(t, 30*time.Second)
+	feed(v, poker.Event{Type: poker.EventTurn, Player: "bot1"})
+	clk.add(20 * time.Second)
+	feed(v, poker.Event{Type: poker.EventTurn, Player: "bot1"})
+	if got := actingLine(t, v); !strings.Contains(got, "行动中… 10s") {
+		t.Fatalf("还是同一个人在想，钟该继续走到 10s：%q", got)
+	}
+	// 换人了才重新给一份时间。
+	feed(v, poker.Event{Type: poker.EventTurn, Player: "bot2"})
+	if got := actingLine(t, v); !strings.Contains(got, "行动中… 30s") {
+		t.Fatalf("换人了，该重新是 30s：%q", got)
+	}
+}
+
+// TestNoCountdownForYourself：轮到自己时不画倒计时。
+//
+// 这一屏在你打字的时候不重画（重画会把终端刚回显的半行命令抹掉），
+// 所以画上去的数字会停在你开始打字的那一刻——一个不走的秒表比没有秒表更骗人。
+// 时限改由「轮到你了」那行静态地说。
+func TestNoCountdownForYourself(t *testing.T) {
+	v, _ := countdownView(t, 30*time.Second)
+	feed(v,
+		poker.Event{Type: poker.EventTurn, Player: "我"},
+		myTurn(),
+	)
+	frame := v.frame()
+	rows := logRows(frame)
+	last := rows[len(rows)-1]
+	if !strings.Contains(last, "行动中") {
+		t.Fatalf("流水末尾该还在等自己：%q\n%s", last, frame)
+	}
+	if strings.ContainsAny(strings.TrimSuffix(last, "行动中…"), "0123456789") {
+		t.Fatalf("轮到自己不该画倒计时：%q\n%s", last, frame)
+	}
+	if !strings.Contains(frame, "限时 30s") {
+		t.Fatalf("该在「轮到你了」那行说清时限：\n%s", frame)
+	}
+}
+
+// TestNoTimeoutNoCountdown：--timeout 0 的桌子上没有钟，也就没有数字。
+func TestNoTimeoutNoCountdown(t *testing.T) {
+	v, _ := countdownView(t, 0)
+	feed(v, poker.Event{Type: poker.EventTurn, Player: "bot1"})
+	got := actingLine(t, v)
+	if !strings.Contains(got, "行动中…") {
+		t.Fatalf("还是该标出在等谁：%q", got)
+	}
+	if strings.Contains(got, "s") && strings.ContainsAny(got, "0123456789") {
+		// 座位表上本来就有筹码数，所以只盯「行动中…」后面那一截。
+		tail := got[strings.Index(got, "行动中…"):]
+		if strings.ContainsAny(tail, "0123456789") {
+			t.Fatalf("不限时的桌子上不该有倒计时：%q", got)
+		}
+	}
+	// tick 也不该动：没有会走的东西，就别每秒往终端里灌一帧。
+	var out strings.Builder
+	v.out = &out
+	v.tick()
+	if out.Len() != 0 {
+		t.Fatalf("没有倒计时的时候 tick 不该画：%q", out.String())
+	}
+}
+
+// TestTickStaysQuietOnYourTurn：轮到自己时秒针不许动。
+//
+// 动一下就把终端刚回显出来的那半行命令抹掉了，而你正在敲它。
+func TestTickStaysQuietOnYourTurn(t *testing.T) {
+	v, _ := countdownView(t, 30*time.Second)
+	feed(v,
+		poker.Event{Type: poker.EventTurn, Player: "我"},
+		myTurn(),
+	)
+	var out strings.Builder
+	v.out = &out
+	v.tick()
+	if out.Len() != 0 {
+		t.Fatalf("轮到自己时 tick 不该重画：%q", out.String())
+	}
+
+	// 轮到别人就该动了。
+	feed(v, poker.Event{Type: poker.EventAction, Player: "我", Action: "check", Stack: ptr(198)})
+	feed(v, poker.Event{Type: poker.EventTurn, Player: "bot1"})
+	out.Reset()
+	v.tick()
+	if out.Len() == 0 {
+		t.Fatal("轮到别人了，秒针该走")
+	}
+}
+
+// TestTickLeavesTypedTextAlone：秒针走一格不许碰输入行。
+//
+// 这是倒计时最容易毁掉的东西：终端把你敲的半行命令回显在输入行上，而整帧重画
+// 会连它一起抹掉——每秒一次。所以秒针走的是局部重画：存光标、只改变了的那几行、
+// 把光标放回去，从头到尾没有清屏，也没写过输入行。
+func TestTickLeavesTypedTextAlone(t *testing.T) {
+	v, clk := countdownView(t, 30*time.Second)
+	feed(v, poker.Event{Type: poker.EventTurn, Player: "bot1"})
+	v.render() // 先让屏幕上有一帧，下面才有得比
+
+	var out strings.Builder
+	v.out = &out
+	clk.add(time.Second)
+	v.tick()
+
+	got := out.String()
+	if got == "" {
+		t.Fatal("秒针该走一格")
+	}
+	if !strings.HasPrefix(got, "\0337") || !strings.HasSuffix(got, "\0338") {
+		t.Fatalf("要先存光标、最后放回去：%q", got)
+	}
+	if strings.Contains(got, "\033[J") {
+		t.Fatalf("局部重画不许清屏——清了就把用户正在敲的字清掉了：%q", got)
+	}
+	if strings.Contains(got, "> ") {
+		t.Fatalf("输入行一个字节都不该写：%q", got)
+	}
+	// 变了的就那两行（座位表一行、流水末尾一行），别的不许重写。
+	if n := strings.Count(got, "\033[K"); n != 2 {
+		t.Fatalf("该只重写 2 行，重写了 %d 行：%q", n, got)
+	}
+	if !strings.Contains(got, "行动中… 29s") {
+		t.Fatalf("重写的内容不对：%q", got)
+	}
+}
+
+// TestHeightChangeFallsBackToFullRedraw：帧高变了就得整帧重画。
+//
+// 局部重画靠「每一行还在原来那个位置」，多一行流水就全乱了。
+func TestHeightChangeFallsBackToFullRedraw(t *testing.T) {
+	v, _ := countdownView(t, 30*time.Second)
+	v.render()
+
+	// 没人在等，这条动作是净多出来的一行。
+	var out strings.Builder
+	v.out = &out
+	_ = v.event(poker.Event{Type: poker.EventAction, Player: "bot1", Action: "fold", Stack: ptr(199)}, nil)
+	if got := out.String(); !strings.Contains(got, "\r\033[J") {
+		t.Fatalf("多了一条流水，该整帧重画：%q", got)
+	}
+}
+
+// TestActionKeepsHeightAndSpareTheTypedLine：动作替掉「在等谁」那一行，帧高没变。
+//
+// 这是局部重画白赚的一个好处：别人弃牌时流水末尾那行「行动中…」正好被他的
+// 「弃牌」顶掉，一出一进帧高不变，于是你打到一半的那行命令也活下来了。
+func TestActionKeepsHeightAndSparesTheTypedLine(t *testing.T) {
+	v, _ := countdownView(t, 30*time.Second)
+	feed(v, poker.Event{Type: poker.EventTurn, Player: "bot1"})
+	v.render()
+
+	var out strings.Builder
+	v.out = &out
+	_ = v.event(poker.Event{Type: poker.EventAction, Player: "bot1", Action: "fold", Stack: ptr(199)}, nil)
+	got := out.String()
+	if strings.Contains(got, "\033[J") {
+		t.Fatalf("帧高没变，不该清屏：%q", got)
+	}
+	if !strings.Contains(got, "弃牌") {
+		t.Fatalf("该把那一行改成弃牌：%q", got)
 	}
 }

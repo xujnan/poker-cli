@@ -592,14 +592,15 @@ func (s *Server) handleJoin(c *conn, cmd protocol.Command) {
 
 func (s *Server) sendTable(c *conn, name string) {
 	c.send(poker.Event{
-		Type:     poker.EventTable,
-		To:       name,
-		Player:   name,
-		Protocol: poker.ProtocolVersion,
-		Buyin:    s.buyin,
-		Players:  s.seatNames(),
-		Seats:    s.seatViews(),
-		Blinds:   s.blinds.String(),
+		Type:      poker.EventTable,
+		To:        name,
+		Player:    name,
+		Protocol:  poker.ProtocolVersion,
+		Buyin:     s.buyin,
+		TimeoutMS: int(s.timeout.Milliseconds()),
+		Players:   s.seatNames(),
+		Seats:     s.seatViews(),
+		Blinds:    s.blinds.String(),
 	})
 }
 

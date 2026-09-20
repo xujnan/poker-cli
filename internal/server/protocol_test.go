@@ -2,9 +2,12 @@ package server
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/xujnan/poker-cli/internal/poker"
+	"github.com/xujnan/poker-cli/internal/transport"
 )
 
 // TestTableEventCarriesProtocolVersion：agent 收到的第一条消息里必须写着协议版本。
@@ -62,5 +65,46 @@ func TestOnlyTableEventCarriesProtocol(t *testing.T) {
 		if ev.Protocol != 0 {
 			t.Fatalf("%s 事件不该带协议版本，却带了 %d", ev.Type, ev.Protocol)
 		}
+	}
+}
+
+// TestTableEventCarriesTimeout：行动时限也要在第一条事件里。
+//
+// 人类客户端拿它画倒计时，agent 拿它决定「想多久算超」。毫秒是因为自对弈常开
+// --timeout 500ms，按秒取整会变成 0，而 0 在这里的意思正好相反：不限时。
+func TestTableEventCarriesTimeout(t *testing.T) {
+	s := startTableOn(t, transport.NewMemory(), 0, 1500*time.Millisecond)
+	alice := dial(t, s, "alice")
+
+	ev, raw, err := alice.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.TimeoutMS != 1500 {
+		t.Fatalf("时限该是 1500 毫秒，得到 %d", ev.TimeoutMS)
+	}
+	var onWire map[string]any
+	if err := json.Unmarshal(raw, &onWire); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := onWire["timeout_ms"]; !ok || int(got.(float64)) != 1500 {
+		t.Fatalf("线路上的 timeout_ms 不对：%s", raw)
+	}
+}
+
+// TestNoTimeoutSaysZero：不限时的桌子上这个键干脆不出现（omitempty），
+// 客户端读到 0 就是「没有钟」，不必再分「没设」和「设成了 0」。
+func TestNoTimeoutSaysZero(t *testing.T) {
+	s := startTableOn(t, transport.NewMemory(), 0, 0)
+	alice := dial(t, s, "alice")
+	ev, raw, err := alice.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.TimeoutMS != 0 {
+		t.Fatalf("不限时该是 0，得到 %d", ev.TimeoutMS)
+	}
+	if strings.Contains(string(raw), "timeout_ms") {
+		t.Fatalf("不限时就别在线路上占个键：%s", raw)
 	}
 }

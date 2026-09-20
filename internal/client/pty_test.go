@@ -14,21 +14,40 @@ import (
 	"github.com/xujnan/poker-cli/internal/textui"
 )
 
-// screen 是一个只认三样东西的终端：光标上移、清到屏幕末尾、回车换行。
+// screen 是一个只认这几样东西的终端：光标上下移、存/取光标、清到行尾、
+// 清到屏幕末尾、回车换行。
 //
 // 它是这几条测试的判卷人，所以是照着 ANSI 的定义写的，不是照着 live.go 写的——
-// 要是它跟着被测代码一起理解错，那就什么都没测到。反过来说，live.go 只用得上这三样，
-// 引一个完整的终端模拟器来判这三条，是拿一个更大的黑箱去证一个小东西。
+// 要是它跟着被测代码一起理解错，那就什么都没测到。反过来说，live.go 只用得上这几样，
+// 引一个完整的终端模拟器来判它们，是拿一个更大的黑箱去证一个小东西。
+//
+// 加一个序列到 live.go 里就得同时加到这儿。漏掉的话它不会报错，只会把那个
+// 转义序列当成几个普通字符画进屏幕——测试照样绿，测的却已经不是那块屏幕了。
 type screen struct {
 	lines []string
 	row   int
 	col   int
+	// saved 是 DECSC 存下的光标位置。局部重画靠它回到输入行，
+	// 判卷人不认这一对的话，重写完那几行之后它就再也不知道光标在哪了。
+	saved [2]int
 }
 
 var csi = regexp.MustCompile(`^\x1b\[([0-9;]*)([A-Za-z])`)
 
 func (s *screen) feed(text string) {
 	for i := 0; i < len(text); {
+		// DECSC / DECRC 不是 CSI，单独认。
+		if strings.HasPrefix(text[i:], "\0337") {
+			s.saved = [2]int{s.row, s.col}
+			i += 2
+			continue
+		}
+		if strings.HasPrefix(text[i:], "\0338") {
+			s.row, s.col = s.saved[0], s.saved[1]
+			s.fit()
+			i += 2
+			continue
+		}
 		if m := csi.FindStringSubmatch(text[i:]); m != nil {
 			n := 1
 			if m[1] != "" {
@@ -42,6 +61,12 @@ func (s *screen) feed(text string) {
 			switch m[2] {
 			case "A": // CUU：光标上移 n 行
 				s.row = max(0, s.row-n)
+			case "B": // CUD：光标下移 n 行
+				s.row += n
+				s.fit()
+			case "K": // EL 0：从光标清到行尾
+				s.fit()
+				s.lines[s.row] = truncCols(s.lines[s.row], s.col)
 			case "J": // ED 0：从光标清到屏幕末尾
 				s.fit()
 				s.lines[s.row] = truncCols(s.lines[s.row], s.col)
@@ -165,31 +190,36 @@ func TestLiveOnARealTerminalLeavesNoResidue(t *testing.T) {
 	lines := strings.Split(final, "\n")
 	t.Logf("%d 字节、%d 帧，最后屏幕上是：\n%s", len(out), len(frames), final)
 
-	// 打完的每一手都该留在终端上，各留一份。
+	// 屏幕不该越打越长：就地重画的全部意义就在这儿。
 	//
-	// 「各一份」是这条测试里最要紧的断言：重画的行数一旦算错，表现就是某几行被留下
-	// 又被重画一遍——于是同一手出现两次。数数比肉眼看可靠。
-	for _, hand := range []string{"第 1 手", "第 2 手", "第 3 手"} {
-		if n := strings.Count(final, hand); n != 1 {
-			t.Fatalf("屏幕上有 %d 个「%s」，该只有一份：\n%s", n, hand, final)
-		}
+	// 留在屏幕上的只有「上一手的结尾」那一小块，不是每打完一手就往下堆一段——
+	// 堆起来的话实时帧就退化成了滚动流水账，而那正是这一版要避开的东西（ADR-0017）。
+	if len(lines) > rows {
+		t.Fatalf("屏幕有 %d 行，超过终端的 %d 行：\n%s", len(lines), rows, final)
 	}
 
-	// 正在打的那一手（第 3 手往下）是实时帧，它必须塞得进一屏——
-	// 上面那些是已经交给终端回滚缓冲的记录，长出屏幕是正常的。
-	liveAt := -1
+	// 正在打的是第 3 手，而且只有一份。
+	//
+	// 「只有一份」是这条测试里最要紧的断言：重画的行数一旦算错，表现就是某几行
+	// 被留下又被重画一遍——于是同一手出现两次。数数比肉眼看可靠。
+	if n := strings.Count(final, "第 3 手"); n != 1 {
+		t.Fatalf("屏幕上有 %d 个「第 3 手」，该只有一份：\n%s", n, final)
+	}
+	// 第 2 手作为「上一手」留着一小块；第 1 手早该让位了。
+	if !strings.Contains(final, "上一手（第 2 手）") {
+		t.Fatalf("上一手该留在屏幕上：\n%s", final)
+	}
+	if strings.Contains(final, "第 1 手") {
+		t.Fatalf("再往前那手不该还占着地方：\n%s", final)
+	}
+
+	// 正在打的那一块里不该混进上一手的牌。
+	liveAt := 0
 	for i, l := range lines {
 		if strings.Contains(l, "第 3 手") {
 			liveAt = i
 		}
 	}
-	if liveAt < 0 {
-		t.Fatalf("没找到正在打的那一手：\n%s", final)
-	}
-	if live := len(lines) - liveAt; live > rows {
-		t.Fatalf("实时帧有 %d 行，超过终端的 %d 行：\n%s", live, rows, strings.Join(lines[liveAt:], "\n"))
-	}
-	// 实时帧里不该留着前两手的牌——留在上面那些记录里可以，混进当前这手不行。
 	liveFrame := strings.Join(lines[liveAt:], "\n")
 	for _, stale := range []string{"A♠ K♦", "7♥ 7♦"} {
 		if strings.Contains(liveFrame, stale) {
