@@ -371,10 +371,21 @@ func TestStreetRuleShrinksWithTheTerminal(t *testing.T) {
 	}
 }
 
-// TestLogColumnsLineUp：流水排成列，动作那一列不随名字长短飘。
+// colOf 返回 sub 在这一行里从第几**显示列**开始；找不到返回 -1。
+func colOf(line, sub string) int {
+	i := strings.Index(line, sub)
+	if i < 0 {
+		return -1
+	}
+	return textui.Width(line[:i])
+}
+
+// TestLogColumnsLineUp：流水排成列，动作那一列不随名字长短飘，
+// 而且跟上面座位表共用同一条竖线。
 //
-// 名字是 --as 传进来的，ee 和 Christopher 能同桌。不补齐的话「弃牌」「下注到 30」
-// 各自从不同的列开始，一眼扫下来看不出谁做了什么——而看流水本来就是在扫，不是在读。
+// 名字是 --as 传进来的，ee 和 Christopher 能同桌；再加上括号里的位置，长度差得更远。
+// 不补齐的话「弃牌」「下注到 30」各自从不同的列开始，一眼扫下来看不出谁做了什么——
+// 而看流水本来就是在扫，不是在读。
 func TestLogColumnsLineUp(t *testing.T) {
 	v := newLiveView(&strings.Builder{}, "我")
 	seats := []poker.SeatView{
@@ -389,41 +400,46 @@ func TestLogColumnsLineUp(t *testing.T) {
 		poker.Event{Type: poker.EventBlind, Player: "Lily", Action: "big_blind", Amount: 2},
 		poker.Event{Type: poker.EventAction, Player: "Marco", Action: "bet", Committed: 6, Stack: ptr(194), Pot: ptr(9)},
 		poker.Event{Type: poker.EventAction, Player: "Ken", Action: "fold", Stack: ptr(200)},
-		poker.Event{Type: poker.EventAction, Player: "ee", Action: "bet", Committed: 30, Stack: ptr(170), Pot: ptr(38)},
 	)
 
-	want := -1
-	for _, l := range v.log {
-		// 动作从人名那一列的末尾开始，每一行都该是同一列。
-		at := textui.Width(textui.Pad(strings.SplitN(l, " ", 2)[0], logNameWidth))
-		if want < 0 {
-			want = at
-		}
-		if at != want {
-			t.Fatalf("这一行的动作从第 %d 列开始，别的行是第 %d 列：%q", at, want, l)
-		}
-		if got := strings.Index(l, "  "); got < 0 {
-			t.Fatalf("%q 看着没补齐", l)
+	// 每个人名后面都该跟着他的位置。
+	for _, want := range []string{"ee (SB)", "Lily (BB)", "Marco (UTG)", "Ken (BTN)"} {
+		if !strings.Contains(strings.Join(v.log, "\n"), want) {
+			t.Fatalf("流水里该有 %q：\n%s", want, strings.Join(v.log, "\n"))
 		}
 	}
 
-	// 跟座位表那一列对齐：两块东西上下叠着，用的得是同一条竖线。
+	// 动作全都从同一列开始。
+	for _, l := range v.log {
+		var at int
+		for _, verb := range []string{"小盲", "大盲", "下注到", "弃牌"} {
+			if c := colOf(l, verb); c >= 0 {
+				at = c
+				break
+			}
+		}
+		if at != logNameWidth {
+			t.Fatalf("这一行的动作从第 %d 列开始，该是第 %d 列：%q", at, logNameWidth, l)
+		}
+	}
+
+	// 跟座位表共用一条竖线：流水的动作列落在座位表的筹码列上。
+	// 筹码是右对齐的，所以比的是那一列的起点——正好是名字列加位置列。
 	frame := v.frame()
-	var seatLine, logLine string
+	var seatLine string
 	for _, l := range strings.Split(frame, "\n") {
-		if strings.HasPrefix(l, "  Marco") && strings.Contains(l, "UTG") {
+		// 流水里那一行也以 "  Ken " 开头、也含 BTN（就在括号里），
+		// 所以靠括号把两者分开——这正是这次改动引入的歧义。
+		if strings.HasPrefix(l, "  Ken ") && !strings.Contains(l, "(") {
 			seatLine = l
 		}
-		if strings.HasPrefix(l, "  Marco") && strings.Contains(l, "下注到") {
-			logLine = l
-		}
 	}
-	if seatLine == "" || logLine == "" {
-		t.Fatalf("没找到要比的那两行：\n%s", frame)
+	if seatLine == "" {
+		t.Fatalf("没找到 Ken 那一行座位：\n%s", frame)
 	}
-	if a, b := textui.Width(seatLine[:strings.Index(seatLine, "UTG")]),
-		textui.Width(logLine[:strings.Index(logLine, "下注到")]); a != b {
-		t.Fatalf("座位表第二列在第 %d 列，流水第二列在第 %d 列：\n%s", a, b, frame)
+	// 座位行前面有两格 marker，流水行前面有两格缩进，两边一样，所以直接比列。
+	if got := colOf(seatLine, "BTN") + seatPosWidth; got != logNameWidth+2 {
+		t.Fatalf("座位表的筹码列在第 %d 列，流水的动作列在第 %d 列：\n%s", got, logNameWidth+2, frame)
 	}
 }
 

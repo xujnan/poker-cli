@@ -18,12 +18,16 @@ const (
 	// 问不出来只发生在对面不是终端的时候——那种情况下重画本来就该退回滚动输出，
 	// 走不到这里。留一个保守的数，是为了万一走到了也不会画出一屏塞不下的东西。
 	fallbackLogLines = 8
-	// logNameWidth 是流水里人名那一列有多宽。
+	// 座位表那几列有多宽。名字超出就不补了：宁可那一行歪掉，也不能把名字切一半。
+	seatNameWidth  = 12
+	seatPosWidth   = 7
+	seatStackWidth = 6
+	// logNameWidth 是流水里「谁」那一列有多宽——名字加上括号里的位置。
 	//
-	// 跟座位表那一列同宽是故意的：两块东西上下叠着，用同一条竖线对齐，
-	// 整帧看着才是一张表，而不是几段各自为政的文字。名字超出这个宽度就不补了，
-	// 宁可那一行歪掉，也不能把名字切一半。
-	logNameWidth = 12
+	// 它等于座位表的名字列加位置列，所以流水的动作列正好落在座位表的筹码列上。
+	// 写成加法而不是写死 19，是为了让这层关系留在代码里：改上面任何一个数，
+	// 对齐自己会跟着走，而不是等某天有人发现两块错开了才想起来还有这回事。
+	logNameWidth = seatNameWidth + seatPosWidth
 	// logActWidth 是「做了什么」那一列有多宽。超出的不截断，宁可那一行的底池往右顶，
 	// 也不能把「全下 30（本轮共 30）」切一半。
 	logActWidth = 14
@@ -141,7 +145,7 @@ func (v *liveView) apply(ev poker.Event) {
 		if ev.Action == "big_blind" {
 			name = "大盲"
 		}
-		v.addLog("%s", logLine(ev.Player, fmt.Sprintf("%s %d", name, ev.Amount), ""))
+		v.addLog("%s", logLine(v.who(ev.Player), fmt.Sprintf("%s %d", name, ev.Amount), ""))
 	case poker.EventHoleCards:
 		// 只认自己那一份。服务端本来就只会把底牌投递给它的主人（ADR-0006），
 		// 但这是一个会一直画在屏幕上的状态：不在这里认一次人，可见性就多了一个
@@ -160,14 +164,14 @@ func (v *liveView) apply(ev poker.Event) {
 		}
 	case poker.EventAction:
 		v.turn = nil
-		v.addLog("%s", logLine(ev.Player, actionWhat(ev), actionPot(ev)))
+		v.addLog("%s", logLine(v.who(ev.Player), actionWhat(ev), actionPot(ev)))
 		v.patchSeat(ev)
 	case poker.EventStreet:
 		v.street, v.board = ev.Street, ev.Board
 		v.addLog("%s", v.streetRule(streetName(ev.Street), ev.Cards))
 	case poker.EventShowdown:
 		for _, e := range ev.Showdown {
-			v.addLog("%s", logLine(e.Player, textui.Cards(e.Cards), "→ "+e.Category))
+			v.addLog("%s", logLine(v.who(e.Player), textui.Cards(e.Cards), "→ "+e.Category))
 		}
 	case poker.EventPotAwarded:
 		for i, pot := range ev.Pots {
@@ -210,7 +214,21 @@ func (v *liveView) patchSeat(ev poker.Event) {
 	v.seats = seats
 }
 
-// logLine 把流水排成两列：谁，做了什么。
+// who 是流水里「谁」那一列：名字后面用括号带上他这手牌的位置。
+//
+// 位置是德扑里最要紧的那个变量——同样两张牌，在 BTN 和在 UTG 是两手完全不同的牌。
+// 座位表上有，但看流水时眼睛在下半屏，来回对照太累；而这一列本来就有地方放。
+// 两手牌之间没有庄家位，也就没有位置可言，那时候只写名字。
+func (v *liveView) who(name string) string {
+	for _, s := range v.seats {
+		if s.Player == name && s.Position != "" {
+			return name + " (" + s.Position + ")"
+		}
+	}
+	return name
+}
+
+// logLine 把流水排成三列：谁、做了什么、底池。
 //
 // 不补齐的话人名长短不一，「弃牌」「下注到 30」这些就各自从不同的列开始，
 // 一眼扫下来看不出谁做了什么——而看流水本来就是在扫，不是在读。
@@ -334,8 +352,8 @@ func (v *liveView) headAndSeats() string {
 		if v.turn != nil && s.Player == v.me {
 			marker = "▶ "
 		}
-		line := marker + textui.Pad(s.Player, 12) + textui.Pad(s.Position, 7) +
-			textui.PadLeft(fmt.Sprintf("%d", s.Stack), 6)
+		line := marker + textui.Pad(s.Player, seatNameWidth) + textui.Pad(s.Position, seatPosWidth) +
+			textui.PadLeft(fmt.Sprintf("%d", s.Stack), seatStackWidth)
 		switch {
 		case s.Folded:
 			line += "  弃"
