@@ -18,6 +18,25 @@ const (
 	// 问不出来只发生在对面不是终端的时候——那种情况下重画本来就该退回滚动输出，
 	// 走不到这里。留一个保守的数，是为了万一走到了也不会画出一屏塞不下的东西。
 	fallbackLogLines = 8
+	// logNameWidth 是流水里人名那一列有多宽。
+	//
+	// 跟座位表那一列同宽是故意的：两块东西上下叠着，用同一条竖线对齐，
+	// 整帧看着才是一张表，而不是几段各自为政的文字。名字超出这个宽度就不补了，
+	// 宁可那一行歪掉，也不能把名字切一半。
+	logNameWidth = 12
+	// logActWidth 是「做了什么」那一列有多宽。超出的不截断，宁可那一行的底池往右顶，
+	// 也不能把「全下 30（本轮共 30）」切一半。
+	logActWidth = 14
+	// streetRuleWidth 是街分隔线画多宽（列）。
+	//
+	// 不铺满整个终端：在一个 200 列的窗口里拉一条 200 列的横线，抢的注意力
+	// 比它分隔的内容还多。这个数跟座位表那几行差不多宽，看着是一块的。
+	streetRuleWidth = 46
+	// roomyHeight 是「屏幕够高，可以拿几行出来留白」的门槛。
+	//
+	// 空行让几块内容分得开，读起来松快，但它是奢侈品：屏幕矮的时候这几行该让给
+	// 真正的内容——一屏只剩八行还拿三行画空白，那是好看压过了好用。
+	roomyHeight = 18
 	// minLogLines 是再挤也要留几条流水。
 	//
 	// 终端矮到连这几条都放不下时，宁可让它滚一下，也不能把「刚才发生了什么」删干净——
@@ -58,6 +77,14 @@ type liveView struct {
 
 func newLiveView(out io.Writer, me string) *liveView {
 	return &liveView{out: out, me: me}
+}
+
+// spacer 是块与块之间的那个空行，屏幕不够高时它什么都不占。
+func (v *liveView) spacer() string {
+	if h := textui.Height(v.out); h > 0 && h < roomyHeight {
+		return ""
+	}
+	return "\n"
 }
 
 // 下面四个方法是 view 那套接口，把「攒状态 + 重画」接到 Play 的主循环上。
@@ -114,7 +141,7 @@ func (v *liveView) apply(ev poker.Event) {
 		if ev.Action == "big_blind" {
 			name = "大盲"
 		}
-		v.addLog("%s %s %d", ev.Player, name, ev.Amount)
+		v.addLog("%s", logLine(ev.Player, fmt.Sprintf("%s %d", name, ev.Amount), ""))
 	case poker.EventHoleCards:
 		// 只认自己那一份。服务端本来就只会把底牌投递给它的主人（ADR-0006），
 		// 但这是一个会一直画在屏幕上的状态：不在这里认一次人，可见性就多了一个
@@ -133,14 +160,14 @@ func (v *liveView) apply(ev poker.Event) {
 		}
 	case poker.EventAction:
 		v.turn = nil
-		v.addLog("%s", renderAction(ev))
+		v.addLog("%s", logLine(ev.Player, actionWhat(ev), actionPot(ev)))
 		v.patchSeat(ev)
 	case poker.EventStreet:
 		v.street, v.board = ev.Street, ev.Board
-		v.addLog("── %s %s", streetName(ev.Street), textui.Cards(ev.Cards))
+		v.addLog("%s", v.streetRule(streetName(ev.Street), ev.Cards))
 	case poker.EventShowdown:
 		for _, e := range ev.Showdown {
-			v.addLog("%s %s → %s", e.Player, textui.Cards(e.Cards), e.Category)
+			v.addLog("%s", logLine(e.Player, textui.Cards(e.Cards), "→ "+e.Category))
 		}
 	case poker.EventPotAwarded:
 		for i, pot := range ev.Pots {
@@ -181,6 +208,40 @@ func (v *liveView) patchSeat(ev poker.Event) {
 		}
 	}
 	v.seats = seats
+}
+
+// logLine 把流水排成两列：谁，做了什么。
+//
+// 不补齐的话人名长短不一，「弃牌」「下注到 30」这些就各自从不同的列开始，
+// 一眼扫下来看不出谁做了什么——而看流水本来就是在扫，不是在读。
+func logLine(who, what, pot string) string {
+	line := textui.Pad(who, logNameWidth) + textui.Pad(what, logActWidth) + pot
+	// 没有底池那一列时，别在行尾留一串看不见的空格。
+	return strings.TrimRight(line, " ")
+}
+
+// streetRule 画一条带街名和新翻开的牌的分隔线，用来把前后两条街的动作断开。
+//
+// 一条街打完进下一条，是这手牌里最需要一眼看见的断点——上一条街的下注全部结清，
+// 牌面变了，重新开始说话。只在前面点两个横杠不够显眼，所以这里补到一整行。
+//
+// 宽度要看终端：画过头了会折行，而折了一行，「上移 N 行」就再也对不上了。
+func (v *liveView) streetRule(name string, dealt []poker.Card) string {
+	lead, label := "────", fmt.Sprintf(" %s %s ", name, textui.Cards(dealt))
+	width := streetRuleWidth
+	// 减 2 是 frame 给每条流水加的那两格缩进。
+	if c := textui.Cols(v.out) - 2; c > 0 && c < width {
+		width = c
+	}
+	gap := width - textui.Width(lead) - textui.Width(label)
+	if gap <= 0 {
+		// 一根横线都补不下了。label 尾上那个空格是用来跟横线隔开的，没横线就不该占位——
+		// 窄终端上这一格正好是折不折行的分界。
+		return textui.Dim(lead) + strings.TrimRight(label, " ")
+	}
+	// 只把横线调暗：它是分隔符，不是内容。牌和街名不能跟着暗下去，
+	// 而且它们自带颜色，包进同一层样式里会被牌尾那个复位打断。
+	return textui.Dim(lead) + label + textui.Dim(strings.Repeat("─", gap))
 }
 
 func (v *liveView) addLog(format string, args ...any) {
@@ -266,7 +327,7 @@ func (v *liveView) headAndSeats() string {
 	if v.blinds != "" {
 		head += "  盲注 " + v.blinds
 	}
-	fmt.Fprintf(&b, "%s\n", head)
+	fmt.Fprintf(&b, "%s\n%s", textui.Bold(head), v.spacer())
 
 	for _, s := range v.seats {
 		marker := "  "
@@ -292,14 +353,16 @@ func (v *liveView) headAndSeats() string {
 	}
 
 	if len(v.board) > 0 || v.pot > 0 {
-		fmt.Fprintf(&b, "公共牌 %s    底池 %d\n", textui.Cards(v.board), v.pot)
+		fmt.Fprintf(&b, "%s公共牌 %s    底池 %d\n", v.spacer(), textui.Cards(v.board), v.pot)
 	}
+	b.WriteString(v.spacer())
 	return b.String()
 }
 
 // tail 是流水底下那几行：提醒、轮次、输入提示。
 func (v *liveView) tail() string {
 	var b strings.Builder
+	b.WriteString(v.spacer())
 	if v.note != "" {
 		fmt.Fprintf(&b, "%s\n", v.note)
 	}
@@ -310,7 +373,7 @@ func (v *liveView) tail() string {
 		b.WriteString("与牌桌的连接已断开。\n")
 		return b.String()
 	case v.turn != nil:
-		fmt.Fprintf(&b, "轮到你了%s\n%s\n", toCallSuffix(v.turn), legalLine(v.turn))
+		fmt.Fprintf(&b, "%s\n%s\n", textui.Bold("轮到你了"+toCallSuffix(v.turn)), legalLine(v.turn))
 	case v.over:
 		b.WriteString("这手牌结束了，等下一手…\n")
 	}

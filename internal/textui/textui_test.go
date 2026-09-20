@@ -182,6 +182,25 @@ func TestRedForHeartsAndDiamonds(t *testing.T) {
 	}
 }
 
+// TestBoldAndDimAreOffWithoutColor：没开彩色时不许往外吐转义序列。
+//
+// 管道、重定向、转录走的全是这条路，混进 \033[2m 就是一堆乱码。
+func TestBoldAndDimAreOffWithoutColor(t *testing.T) {
+	for _, got := range []string{Bold("轮到你了"), Dim("────")} {
+		if strings.Contains(got, "\033[") {
+			t.Fatalf("不上色时该是干净的，得到 %q", got)
+		}
+	}
+	withColor(t)
+	if got := Bold("轮到你了"); !strings.HasPrefix(got, bold) || !strings.HasSuffix(got, reset) {
+		t.Fatalf("开了彩色该加粗，得到 %q", got)
+	}
+	// 空串不该被包起来：包了之后一个不占列的片段会平白带上两段转义。
+	if got := Dim(""); got != "" {
+		t.Fatalf("空串该原样返回，得到 %q", got)
+	}
+}
+
 // TestWidthIgnoresEscapes：转义序列一列都不占。
 //
 // 算进去的话，上了色的那一行会被当成更宽，于是补空格补少了，表格就歪了。
@@ -197,6 +216,13 @@ func TestWidthIgnoresEscapes(t *testing.T) {
 	// 补齐之后的可见宽度也得对。
 	if got := Width(Pad(colored, 10)); got != 10 {
 		t.Fatalf("补到 10 列，得到 %d", got)
+	}
+	// 加粗和减弱那两种也一样不占列——重画那一版按这个数算光标要挪几行。
+	for _, s := range []string{Bold("轮到你了"), Dim("────")} {
+		plain := strings.NewReplacer(bold, "", dim, "", reset, "").Replace(s)
+		if Width(s) != Width(plain) {
+			t.Fatalf("%q 算出 %d 列，去掉转义之后是 %d 列", s, Width(s), Width(plain))
+		}
 	}
 }
 

@@ -121,7 +121,31 @@ func renderTurn(me string, snap *poker.Snapshot) string {
 	return b.String()
 }
 
+// renderAction 是滚动那一版的一行：谁 + 做了什么，中间一个空格。
 func renderAction(ev poker.Event) string {
+	line := ev.Player + " " + actionWhat(ev)
+	if pot := actionPot(ev); pot != "" {
+		line += "，" + pot
+	}
+	return line
+}
+
+// actionPot 是这个动作之后底池变成了多少，没有可说的就返回空串。
+//
+// 跟动作本身分开，是因为重画那一版把它排成单独一列（见 live.go），
+// 而滚动那一版拼回「下注到 2，底池 8」这样的一句话。
+func actionPot(ev poker.Event) string {
+	if ev.Pot == nil || ev.Action == "fold" || ev.Action == "check" {
+		return ""
+	}
+	return fmt.Sprintf("底池 %d", *ev.Pot)
+}
+
+// actionWhat 只说「做了什么」，不带人名。
+//
+// 跟人名分开是给重画那一版用的：它要把人名补成一列宽，好让动作那一列对齐
+// （见 live.go 的 logLine）。滚动那一版拼回去，输出一个字节都不变。
+func actionWhat(ev poker.Event) string {
 	var what string
 	switch ev.Action {
 	case "fold":
@@ -137,14 +161,10 @@ func renderAction(ev poker.Event) string {
 	default:
 		what = ev.Action
 	}
-	line := fmt.Sprintf("%s %s", ev.Player, what)
 	if ev.Forced {
-		line += "（超时代打）"
+		what += "（超时代打）"
 	}
-	if ev.Pot != nil && ev.Action != "fold" && ev.Action != "check" {
-		line += fmt.Sprintf("，底池 %d", *ev.Pot)
-	}
-	return line
+	return what
 }
 
 func streetName(s string) string {

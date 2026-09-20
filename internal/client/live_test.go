@@ -9,6 +9,7 @@ import (
 	"github.com/creack/pty"
 
 	"github.com/xujnan/poker-cli/internal/poker"
+	"github.com/xujnan/poker-cli/internal/textui"
 )
 
 func ptr(n int) *int { return &n }
@@ -294,5 +295,225 @@ func TestLiveFallsBackWhenHeightIsUnknown(t *testing.T) {
 	}
 	if got := strings.Count(v.frame(), " 条"); got != fallbackLogLines {
 		t.Fatalf("该退回 %d 条，画了 %d 条", fallbackLogLines, got)
+	}
+}
+
+// TestStreetRuleSpansTheLine：街分隔线要铺成一整行，不是前面点两个横杠。
+//
+// 一条街打完进下一条，是这手牌里最需要一眼看见的断点：上一条街的下注全部结清，
+// 牌面变了，重新开始说话。它要跟上下那些动作行明显不是一类东西。
+func TestStreetRuleSpansTheLine(t *testing.T) {
+	v := newLiveView(&strings.Builder{}, "我")
+	feed(v, handOne()...)
+
+	var rule string
+	for _, l := range v.log {
+		if strings.Contains(l, "翻牌") {
+			rule = l
+		}
+	}
+	if rule == "" {
+		t.Fatalf("流水里没有翻牌那一行：%v", v.log)
+	}
+	if !strings.HasPrefix(rule, "────") || !strings.HasSuffix(rule, "─") {
+		t.Fatalf("分隔线该两头都是横线：%q", rule)
+	}
+	// 街名和新翻开的牌都得留在线上——横线好看，但不能把信息挤掉。
+	for _, want := range []string{"翻牌", "2♣ 7♥ 9♠"} {
+		if !strings.Contains(rule, want) {
+			t.Fatalf("分隔线里缺了 %q：%q", want, rule)
+		}
+	}
+	if got := textui.Width(rule); got != streetRuleWidth {
+		t.Fatalf("分隔线该占 %d 列，得到 %d（%q）", streetRuleWidth, got, rule)
+	}
+}
+
+// TestStreetRuleShrinksWithTheTerminal：窄终端上分隔线要跟着缩。
+//
+// 画过头了终端会折行，而折了一行，就地重画时「上移 N 行」就再也对不上了——
+// 一条为了好看画出去的横线，能把整块屏幕毁掉。
+func TestStreetRuleShrinksWithTheTerminal(t *testing.T) {
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Skipf("开不了 pty: %v", err)
+	}
+	defer ptmx.Close()
+	defer tty.Close()
+	go io.Copy(io.Discard, ptmx)
+
+	for _, cols := range []int{100, 46, 30, 20} {
+		if err := pty.Setsize(tty, &pty.Winsize{Rows: 40, Cols: uint16(cols)}); err != nil {
+			t.Fatal(err)
+		}
+		v := newLiveView(tty, "我")
+		feed(v, handOne()...)
+
+		var rule string
+		for _, l := range v.log {
+			if strings.HasPrefix(l, "────") {
+				rule = l
+			}
+		}
+		if rule == "" {
+			t.Fatalf("终端 %d 列时找不到分隔线：%v", cols, v.log)
+		}
+		// 加 2 是 frame 给每条流水的那两格缩进。
+		if w := textui.Width(rule) + 2; w > cols {
+			t.Fatalf("终端 %d 列，分隔线连缩进占了 %d 列：%q", cols, w, rule)
+		}
+		// 缩到再窄，街名和牌也得留着——横线是装饰，那两样是信息。
+		for _, want := range []string{"翻牌", "2♣ 7♥ 9♠"} {
+			if !strings.Contains(rule, want) {
+				t.Fatalf("终端 %d 列时分隔线里缺了 %q：%q", cols, want, rule)
+			}
+		}
+	}
+}
+
+// TestLogColumnsLineUp：流水排成列，动作那一列不随名字长短飘。
+//
+// 名字是 --as 传进来的，ee 和 Christopher 能同桌。不补齐的话「弃牌」「下注到 30」
+// 各自从不同的列开始，一眼扫下来看不出谁做了什么——而看流水本来就是在扫，不是在读。
+func TestLogColumnsLineUp(t *testing.T) {
+	v := newLiveView(&strings.Builder{}, "我")
+	seats := []poker.SeatView{
+		{Player: "ee", Stack: 200, Position: "SB"},
+		{Player: "Lily", Stack: 200, Position: "BB"},
+		{Player: "Marco", Stack: 200, Position: "UTG"},
+		{Player: "Ken", Stack: 200, Position: "BTN"},
+	}
+	feed(v,
+		poker.Event{Type: poker.EventHandStart, Hand: 1, Blinds: "1/2", Seats: seats},
+		poker.Event{Type: poker.EventBlind, Player: "ee", Action: "small_blind", Amount: 1},
+		poker.Event{Type: poker.EventBlind, Player: "Lily", Action: "big_blind", Amount: 2},
+		poker.Event{Type: poker.EventAction, Player: "Marco", Action: "bet", Committed: 6, Stack: ptr(194), Pot: ptr(9)},
+		poker.Event{Type: poker.EventAction, Player: "Ken", Action: "fold", Stack: ptr(200)},
+		poker.Event{Type: poker.EventAction, Player: "ee", Action: "bet", Committed: 30, Stack: ptr(170), Pot: ptr(38)},
+	)
+
+	want := -1
+	for _, l := range v.log {
+		// 动作从人名那一列的末尾开始，每一行都该是同一列。
+		at := textui.Width(textui.Pad(strings.SplitN(l, " ", 2)[0], logNameWidth))
+		if want < 0 {
+			want = at
+		}
+		if at != want {
+			t.Fatalf("这一行的动作从第 %d 列开始，别的行是第 %d 列：%q", at, want, l)
+		}
+		if got := strings.Index(l, "  "); got < 0 {
+			t.Fatalf("%q 看着没补齐", l)
+		}
+	}
+
+	// 跟座位表那一列对齐：两块东西上下叠着，用的得是同一条竖线。
+	frame := v.frame()
+	var seatLine, logLine string
+	for _, l := range strings.Split(frame, "\n") {
+		if strings.HasPrefix(l, "  Marco") && strings.Contains(l, "UTG") {
+			seatLine = l
+		}
+		if strings.HasPrefix(l, "  Marco") && strings.Contains(l, "下注到") {
+			logLine = l
+		}
+	}
+	if seatLine == "" || logLine == "" {
+		t.Fatalf("没找到要比的那两行：\n%s", frame)
+	}
+	if a, b := textui.Width(seatLine[:strings.Index(seatLine, "UTG")]),
+		textui.Width(logLine[:strings.Index(logLine, "下注到")]); a != b {
+		t.Fatalf("座位表第二列在第 %d 列，流水第二列在第 %d 列：\n%s", a, b, frame)
+	}
+}
+
+// TestScrollingFormatIsUnchanged：把人名从动作里拆出来是给重画那一版用的，
+// 滚动那一版的每一行必须一个字节都不变——转录、日志、测试断言都在那条路上。
+func TestScrollingFormatIsUnchanged(t *testing.T) {
+	cases := []struct {
+		ev   poker.Event
+		want string
+	}{
+		{poker.Event{Type: poker.EventAction, Player: "ee", Action: "fold"}, "ee 弃牌"},
+		{poker.Event{Type: poker.EventAction, Player: "Lily", Action: "check"}, "Lily 过牌"},
+		{poker.Event{Type: poker.EventAction, Player: "Marco", Action: "bet", Committed: 6, Pot: ptr(9)}, "Marco 下注到 6，底池 9"},
+		{poker.Event{Type: poker.EventAction, Player: "Ken", Action: "call", Amount: 2, Pot: ptr(4)}, "Ken 跟注 2，底池 4"},
+		{poker.Event{Type: poker.EventAction, Player: "ee", Action: "fold", Forced: true}, "ee 弃牌（超时代打）"},
+		{poker.Event{Type: poker.EventAction, Player: "ee", Action: "allin", Amount: 30, Committed: 30, Pot: ptr(38)}, "ee 全下 30（本轮共 30），底池 38"},
+	}
+	for _, c := range cases {
+		if got := renderAction(c.ev); got != c.want {
+			t.Fatalf("得到 %q，该是 %q", got, c.want)
+		}
+	}
+}
+
+// TestSpacersYieldOnShortTerminals：空行是奢侈品，屏幕矮了就让给内容。
+//
+// 留白让几块内容分得开，读起来松快。但一屏只剩十来行还拿三行画空白，
+// 那是好看压过了好用——真正要看的流水反而被挤没了。
+func TestSpacersYieldOnShortTerminals(t *testing.T) {
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Skipf("开不了 pty: %v", err)
+	}
+	defer ptmx.Close()
+	defer tty.Close()
+	go io.Copy(io.Discard, ptmx)
+
+	blanksAt := func(rows int) int {
+		if err := pty.Setsize(tty, &pty.Winsize{Rows: uint16(rows), Cols: 90}); err != nil {
+			t.Fatal(err)
+		}
+		v := newLiveView(tty, "我")
+		feed(v, handOne()...)
+		n := 0
+		for _, l := range strings.Split(v.frame(), "\n") {
+			if strings.TrimSpace(l) == "" {
+				n++
+			}
+		}
+		return n
+	}
+	if got := blanksAt(30); got == 0 {
+		t.Fatal("屏幕够高时该有留白")
+	}
+	if got := blanksAt(12); got != 0 {
+		t.Fatalf("12 行的终端不该还留 %d 个空行", got)
+	}
+}
+
+// TestLogPotColumnLinesUp：底池那一列也得对齐。
+//
+// 「下注到 2，底池 8」读起来是一句话，要一个字一个字看；排成列之后是一张表，
+// 扫一眼就知道池子怎么涨起来的——看流水本来就是在扫。
+func TestLogPotColumnLinesUp(t *testing.T) {
+	v := newLiveView(&strings.Builder{}, "我")
+	feed(v,
+		poker.Event{Type: poker.EventHandStart, Hand: 1, Blinds: "1/2"},
+		poker.Event{Type: poker.EventAction, Player: "Lily", Action: "bet", Committed: 2, Stack: ptr(198), Pot: ptr(14)},
+		poker.Event{Type: poker.EventAction, Player: "Marco", Action: "call", Amount: 2, Stack: ptr(198), Pot: ptr(16)},
+		poker.Event{Type: poker.EventAction, Player: "ee", Action: "allin", Amount: 30, Committed: 30, Stack: ptr(0), Pot: ptr(46)},
+	)
+	want := -1
+	for _, l := range v.log {
+		at := strings.Index(l, "底池")
+		if at < 0 {
+			t.Fatalf("这一行该有底池那一列：%q", l)
+		}
+		col := textui.Width(l[:at])
+		if want < 0 {
+			want = col
+		}
+		// 全下那一行的动作超宽，允许它把底池往右顶——宁可歪一行，也不能把话切一半。
+		if l == v.log[len(v.log)-1] {
+			if col <= want {
+				t.Fatalf("超宽的动作该把底池顶出去：%q", l)
+			}
+			continue
+		}
+		if col != want {
+			t.Fatalf("底池从第 %d 列开始，别的行是第 %d 列：%q", col, want, l)
+		}
 	}
 }

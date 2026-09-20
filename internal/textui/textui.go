@@ -30,6 +30,8 @@ var suitSymbols = [4]string{"♠", "♥", "♦", "♣"}
 
 const (
 	red   = "\033[31m"
+	bold  = "\033[1m"
+	dim   = "\033[2m"
 	reset = "\033[0m"
 )
 
@@ -75,6 +77,22 @@ func Height(w io.Writer) int {
 	return h
 }
 
+// Cols 返回 w 那一头的终端有多少列，问不出来就返回 0。
+//
+// 跟 Height 一样是每次用的时候现问。画横线这类「铺到多宽」的东西必须问它：
+// 画过头了终端会折行，而折了一行，就地重画时「上移 N 行」就再也对不上了。
+func Cols(w io.Writer) int {
+	f, ok := w.(*os.File)
+	if !ok {
+		return 0
+	}
+	c, _, err := term.GetSize(int(f.Fd()))
+	if err != nil {
+		return 0
+	}
+	return c
+}
+
 // UseColor 在 w 确实是终端时打开彩色。只在进程启动时调一次。
 //
 // 管道和文件里一律不上色：转录、测试、重定向出来的日志都不该混进转义序列。
@@ -96,6 +114,23 @@ func Card(c poker.Card) string {
 		return red + s + reset
 	}
 	return s
+}
+
+// Bold 和 Dim 给一段文字加重或减弱，没开彩色时原样返回。
+//
+// 只能用在**不含其他样式**的片段上。终端的 \033[0m 是「全部复位」，不是「复位我这一层」，
+// 所以把一张标红的牌包进 Dim 里，牌尾那个复位会顺手把 dim 也关掉，后半行就花了。
+// 要给带牌的一行分层，就把不带牌的那几段分别包起来（街分隔线那条横线就是这么做的）。
+func Bold(s string) string { return wrap(bold, s) }
+
+// Dim 见 Bold。
+func Dim(s string) string { return wrap(dim, s) }
+
+func wrap(style, s string) string {
+	if !colorOn.Load() || s == "" {
+		return s
+	}
+	return style + s + reset
 }
 
 // Cards 把一串牌排成一行。空的时候给一个短横，免得那一栏看起来像漏了。
