@@ -204,6 +204,18 @@ const helpText = `可用命令：
 // 千万别为了省事把它改成服务端里的一个 goroutine，那样它天然能看到所有人的底牌，
 // ADR-0006 那条不变量对它就不成立了。
 func RunBot(s *Session, out io.Writer, rebuy bool) error {
+	return RunBotWith(s, out, rebuy, Decide)
+}
+
+// RunBotWith 跟 RunBot 一样，只是换一个大脑。
+//
+// 分出这一层是为了让测试能把「怎么决策」和「输光了怎么补码」拆开。补码那条路
+// 是要测的东西，决策那条路却会让测试变成赌骰子：两个策略一样的机器人对打，
+// 浅筹码那个人的筹码是个鞅，「他会输光」这件事在任何固定时限里都不保证发生——
+// 一条 17% 会挂的测试，比没有测试更糟。换成只弃牌的大脑，输光就成了必然。
+//
+// 将来做 agent 评测时，「同一套接口换不同的大脑」也正是要的形状。
+func RunBotWith(s *Session, out io.Writer, rebuy bool, decide func(*poker.Snapshot) poker.Action) error {
 	buy := rebuyer{name: s.Name(), enabled: rebuy}
 	for {
 		ev, _, err := s.Next()
@@ -225,7 +237,7 @@ func RunBot(s *Session, out io.Writer, rebuy bool) error {
 		if ev.Type != poker.EventYourTurn || ev.Snapshot == nil {
 			continue
 		}
-		action := Decide(ev.Snapshot)
+		action := decide(ev.Snapshot)
 		fmt.Fprintf(out, "→ %s\n", action)
 		if err := s.Send(protocol.CommandOf(action)); err != nil {
 			return err

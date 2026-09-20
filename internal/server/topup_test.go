@@ -21,7 +21,29 @@ func dialWith(t *testing.T, s *Server, name string, buyin int) *client.Session {
 }
 
 // collectUntil 读一个客户端的事件流，读到 stop 说停为止；轮到自己就照机器人的脑子打。
+// foldAlways 是一个只会弃牌的大脑，用来让「输光」成为必然而不是碰运气。
+//
+// 一个会打牌的浅筹码玩家，筹码是个鞅：他可能先涨上去，于是「他会输光」在任何
+// 固定时限里都不保证发生（实测 17% 的运行会因此超时）。只弃牌的人不一样——
+// 每圈固定输掉自己的小盲，唯一的进账是对手弃牌时那一个小盲，净额每圈 ≤ 0，
+// 而且筹码封了顶：他只在盲注超过自己筹码时才被动全下，最多翻一倍就回到原点。
+// 于是输光有界且很快。
+func foldAlways(*poker.Snapshot) poker.Action { return poker.Action{Kind: poker.Fold} }
+
+// aliceBuyin 是那个注定要输光的人带多少上桌：两个大盲，单挑一圈就见底。
+const aliceBuyin = 4
+
 func collectUntil(t *testing.T, sess *client.Session, play bool, stop func([]poker.Event) bool) <-chan []poker.Event {
+	t.Helper()
+	decide := client.Decide
+	if !play {
+		decide = nil
+	}
+	return collectUntilWith(t, sess, decide, stop)
+}
+
+// collectUntilWith 跟 collectUntil 一样，但可以指定用哪个大脑；decide 为 nil 表示只看不玩。
+func collectUntilWith(t *testing.T, sess *client.Session, decide func(*poker.Snapshot) poker.Action, stop func([]poker.Event) bool) <-chan []poker.Event {
 	t.Helper()
 	out := make(chan []poker.Event, 1)
 	go func() {
@@ -33,8 +55,8 @@ func collectUntil(t *testing.T, sess *client.Session, play bool, stop func([]pok
 				return
 			}
 			events = append(events, ev)
-			if play && ev.Type == poker.EventYourTurn && ev.Snapshot != nil {
-				if err := sess.Send(protocol.CommandOf(client.Decide(ev.Snapshot))); err != nil {
+			if decide != nil && ev.Type == poker.EventYourTurn && ev.Snapshot != nil {
+				if err := sess.Send(protocol.CommandOf(decide(ev.Snapshot))); err != nil {
 					out <- events
 					return
 				}
@@ -154,10 +176,11 @@ func TestTopUpNeverLandsMidHand(t *testing.T) {
 func TestBustAndRebuyKeepsTheTableRunning(t *testing.T) {
 	s := startTableWithTimeout(t, 5*time.Millisecond, 50*time.Millisecond)
 
-	// alice 带 4 块打 1/2，输光是迟早的事；--rebuy 让她自己补回来。
-	// 她跑的是真正的 poker bot 那条路，补码逻辑也是发布出去的那份。
-	alice := dialWith(t, s, "alice", 4)
-	go func() { _ = client.RunBot(alice, io.Discard, true) }()
+	// alice 带 4 块打 1/2，只弃牌，所以输光是必然而不是碰运气（见 foldAlways）。
+	// 她跑的仍是真正的 poker bot 那条路，--rebuy 的补码逻辑就是发布出去的那份——
+	// 换掉的只有大脑，被测的那半点没动。
+	alice := dialWith(t, s, "alice", aliceBuyin)
+	go func() { _ = client.RunBotWith(alice, io.Discard, true, foldAlways) }()
 
 	// bob 既是对手，也是这场测试的眼睛。
 	bob := dialWith(t, s, "bob", 200)
@@ -184,6 +207,23 @@ func TestBustAndRebuyKeepsTheTableRunning(t *testing.T) {
 	})
 
 	events := waitEvents(t, done)
+
+	// 这条测试不再碰运气，靠的是「只弃牌的人涨不起来」这个性质，所以把它钉住。
+	//
+	// 界放在「翻倍」而不是「等于带入」：她确实能短暂涨过带入——当大盲投出 2 之后
+	// 对手小盲弃牌，她白收自己那 2 加对手那 1，于是 4 变 5。但也就到此为止，
+	// 她赢得回来的最多是自己投出去的盲注加对手的小盲，翻倍是做不到的。
+	// 哪天有人把 foldAlways 换回会打牌的大脑，这一条会先红（那次实测冲到了 45），
+	// 而不是让测试重新开始偶尔超时。
+	const cantDouble = 2 * aliceBuyin
+	for _, ev := range events {
+		for _, sv := range ev.Seats {
+			if sv.Player == "alice" && sv.Stack > cantDouble {
+				t.Fatalf("alice 只弃牌却攒到了 %d 个筹码，这条测试又回去赌骰子了", sv.Stack)
+			}
+		}
+	}
+
 	busted, rebought, hands := false, false, 0
 	for _, ev := range events {
 		switch ev.Type {
@@ -279,10 +319,11 @@ func TestBustedPlayerComesBackByToppingUp(t *testing.T) {
 	s := startTableWithTimeout(t, 5*time.Millisecond, 50*time.Millisecond)
 	bob := dial(t, s, "bob")
 	keepPlaying(t, bob)
-	alice := dialWith(t, s, "alice", 4) // 单挑带 4 块打 1/2，很快就没了
+	// 单挑带 4 块打 1/2，而且只弃牌——输光因此是必然的，不是碰运气（见 foldAlways）。
+	alice := dialWith(t, s, "alice", 4)
 
 	stage := 0
-	done := collectUntil(t, alice, true, func(evs []poker.Event) bool {
+	done := collectUntilWith(t, alice, foldAlways, func(evs []poker.Event) bool {
 		last := evs[len(evs)-1]
 		switch stage {
 		case 0:
