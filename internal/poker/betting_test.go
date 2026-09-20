@@ -217,7 +217,14 @@ func TestMinRaiseIsEnforced(t *testing.T) {
 	x := newHarness(t, []int{200, 200, 200}, 0, Blinds{1, 2}, 9)
 	// preflop 最高注是 2，最小加注到 4。推到 3 应该被拒。
 	x.doAs("alice", "bet 3")
-	last := x.events[len(x.events)-2] // 错误事件，后面跟着重发的 your_turn
+	// 按类型找，不数下标：这一串后面跟着重发的轮次事件，而那串有多长
+	// 是会变的（加一条广播的 turn 就变过一次），数下标的断言每次都得跟着改。
+	var last Event
+	for _, ev := range x.events {
+		if ev.Type == EventError {
+			last = ev
+		}
+	}
 	if last.Type != EventError || last.Code != "min_raise" {
 		t.Fatalf("想要 min_raise 错误，得到 %+v", last)
 	}

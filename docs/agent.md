@@ -146,7 +146,7 @@ LJ   HJ   CO  从 BTN 往右数回来的三个位置，CO 紧挨着 BTN
 一手牌的事件顺序固定是：
 
 ```
-hand_start → blind × 2 → hole_cards → [your_turn ⇄ action]…
+hand_start → blind × 2 → hole_cards → [turn + your_turn ⇄ action]…
            → street（flop/turn/river，各自后面跟若干 action）
            → showdown → pot_awarded → hand_end
 ```
@@ -160,7 +160,8 @@ hand_start → blind × 2 → hole_cards → [your_turn ⇄ action]…
 | `hand_start` | 新的一手 | `hand`、`players`、`button`、`blinds`、`seats` |
 | `blind` | 收盲注 | `player`、`action`（`small_blind`/`big_blind`）、`amount` |
 | `hole_cards` | 发底牌，**只发给本人** | `cards` |
-| `your_turn` | 轮到你了，**只发给本人** | `snapshot`（见上） |
+| `turn` | 轮到某人了，**广播给全桌** | `player`、`street`。谁在想牌是公开信息，真牌桌上一桌人都看得见 |
+| `your_turn` | 轮到你了，**只发给本人** | `snapshot`（见上）。它永远紧跟在那条 `turn` 后面，说的是同一个人 |
 | `action` | 有人做了动作 | `player`、`action`、`amount`（这一下投了多少）、`committed`（本轮共多少）、`stack`、`pot`、`forced` |
 | `street` | 翻开新的一条街 | `street`、`cards`（新翻开的）、`board`（全部公共牌）、`pot` |
 | `showdown` | 摊牌 | `showdown[]`：每人的 `player`、`cards`、`category`、`best` |

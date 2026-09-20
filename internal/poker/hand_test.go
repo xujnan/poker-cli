@@ -144,11 +144,34 @@ func TestHandEventSequence(t *testing.T) {
 	// 开局固定是：hand_start、两个盲注、两份底牌，然后才轮到人说话。
 	want := []EventType{
 		EventHandStart, EventBlind, EventBlind,
-		EventHoleCards, EventHoleCards, EventYourTurn,
+		EventHoleCards, EventHoleCards, EventTurn, EventYourTurn,
 	}
 	for i, w := range want {
 		if events[i].Type != w {
 			t.Fatalf("第 %d 条事件是 %s，想要 %s", i, events[i].Type, w)
+		}
+	}
+
+	// turn 和 your_turn 永远成对出现，而且说的是同一个人。
+	//
+	// 前者广播给全桌（谁在想牌，真牌桌上一桌人都看得见），后者只给当事人、带完整快照。
+	// 漏发广播那条，别人就不知道牌桌在等谁；两条对不上，屏幕上标的人和真正握有
+	// 行动权的人就不是一个——这种错特别难看出来，所以在这儿钉死。
+	for i, ev := range events {
+		if ev.Type != EventTurn {
+			continue
+		}
+		if ev.To != "" {
+			t.Fatalf("第 %d 条 turn 是定向的（To=%q），它该广播给全桌", i, ev.To)
+		}
+		if i+1 >= len(events) || events[i+1].Type != EventYourTurn {
+			t.Fatalf("第 %d 条 turn 后面没有紧跟着 your_turn", i)
+		}
+		if events[i+1].Player != ev.Player {
+			t.Fatalf("turn 说轮到 %s，your_turn 却发给了 %s", ev.Player, events[i+1].Player)
+		}
+		if len(ev.Cards) > 0 || ev.Snapshot != nil {
+			t.Fatalf("广播的 turn 里不该带任何牌或快照：%+v", ev)
 		}
 	}
 	// 结尾固定是：摊牌、分池、结束。

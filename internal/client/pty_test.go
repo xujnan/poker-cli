@@ -159,30 +159,45 @@ func TestLiveOnARealTerminalLeavesNoResidue(t *testing.T) {
 			end = frames[i+1][0]
 		}
 		sc.feed(out[f[0]:end])
-		if len(sc.lines) > rows {
-			t.Fatalf("第 %d 帧之后屏幕有 %d 行，超过终端的 %d 行：\n%s",
-				i, len(sc.lines), rows, sc.text())
-		}
 	}
 
 	final := sc.text()
+	lines := strings.Split(final, "\n")
 	t.Logf("%d 字节、%d 帧，最后屏幕上是：\n%s", len(out), len(frames), final)
 
-	// 屏幕上只该剩最后一帧。上一手的牌、上一帧的流水，一个字都不该留。
-	if n := strings.Count(final, "第 "); n != 1 {
-		t.Fatalf("屏幕上有 %d 个「第 N 手」，该只有一个：\n%s", n, final)
+	// 打完的每一手都该留在终端上，各留一份。
+	//
+	// 「各一份」是这条测试里最要紧的断言：重画的行数一旦算错，表现就是某几行被留下
+	// 又被重画一遍——于是同一手出现两次。数数比肉眼看可靠。
+	for _, hand := range []string{"第 1 手", "第 2 手", "第 3 手"} {
+		if n := strings.Count(final, hand); n != 1 {
+			t.Fatalf("屏幕上有 %d 个「%s」，该只有一份：\n%s", n, hand, final)
+		}
+	}
+
+	// 正在打的那一手（第 3 手往下）是实时帧，它必须塞得进一屏——
+	// 上面那些是已经交给终端回滚缓冲的记录，长出屏幕是正常的。
+	liveAt := -1
+	for i, l := range lines {
+		if strings.Contains(l, "第 3 手") {
+			liveAt = i
+		}
+	}
+	if liveAt < 0 {
+		t.Fatalf("没找到正在打的那一手：\n%s", final)
+	}
+	if live := len(lines) - liveAt; live > rows {
+		t.Fatalf("实时帧有 %d 行，超过终端的 %d 行：\n%s", live, rows, strings.Join(lines[liveAt:], "\n"))
+	}
+	// 实时帧里不该留着前两手的牌——留在上面那些记录里可以，混进当前这手不行。
+	liveFrame := strings.Join(lines[liveAt:], "\n")
+	for _, stale := range []string{"A♠ K♦", "7♥ 7♦"} {
+		if strings.Contains(liveFrame, stale) {
+			t.Fatalf("上一手的底牌 %s 混进了正在打的这一帧：\n%s", stale, liveFrame)
+		}
 	}
 	if strings.Contains(final, "> ") {
 		t.Fatalf("断开之后还留着输入提示：\n%s", final)
-	}
-	if !strings.Contains(final, "第 3 手") {
-		t.Fatalf("最后该停在第 3 手上：\n%s", final)
-	}
-	// 前两手的底牌绝不能还在屏幕上。
-	for _, stale := range []string{"A♠ K♦", "7♥ 7♦"} {
-		if strings.Contains(final, stale) {
-			t.Fatalf("上一手的底牌 %s 还留在屏幕上：\n%s", stale, final)
-		}
 	}
 	// 每一行都不该宽过终端——宽了会折行，折了行「上移 N 行」就再也对不上了。
 	for _, l := range sc.lines {

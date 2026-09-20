@@ -27,7 +27,12 @@ const (
 	EventSitIn  EventType = "sit_in"
 	EventTopUp  EventType = "top_up"
 
-	EventHandStart  EventType = "hand_start"
+	EventHandStart EventType = "hand_start"
+	// EventTurn 广播「现在轮到谁」。它是公开信息——真牌桌上谁在想牌，一桌人都看得见。
+	//
+	// 它跟 EventYourTurn 是同一件事的两面：那一条只投给当事人、带完整快照（ADR-0007），
+	// 这一条给全桌、只说名字。两条由同一个函数一起生成，所以不可能各说各的。
+	EventTurn       EventType = "turn"
 	EventBlind      EventType = "blind"
 	EventHoleCards  EventType = "hole_cards"
 	EventYourTurn   EventType = "your_turn"

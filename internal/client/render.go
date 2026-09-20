@@ -44,6 +44,11 @@ func Render(ev poker.Event) string {
 		// hole_cards 只会投递给它的主人，所以这里说「你的」永远没错。
 		return fmt.Sprintf("你的底牌：%s", cards(ev.Cards))
 
+	case poker.EventTurn:
+		// 滚动那一版不渲染它：下一条就是那个人的动作，中间插一句「轮到谁」只是噪音。
+		// 重画那一版用得上——它要在座位表上标出牌桌在等谁（见 live.go）。
+		// 显式列在这里而不是落到 default，是因为 default 会打「(未知事件 turn)」。
+		return ""
 	case poker.EventYourTurn:
 		return renderTurn(ev.Player, ev.Snapshot)
 	case poker.EventAction:

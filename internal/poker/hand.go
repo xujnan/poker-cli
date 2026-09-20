@@ -184,7 +184,7 @@ func (h *Hand) Apply(player string, a Action) []Event {
 		h.illegal[i]++
 		out := []Event{*bad}
 		if h.illegal[i] < maxIllegalActions {
-			return append(out, h.yourTurn())
+			return append(out, h.turnEvents()...)
 		}
 		// 第三次了。能 check 就 check，否则 fold——跟行动超时同一套处理。
 		h.illegal[i] = 0
@@ -259,7 +259,7 @@ func (h *Hand) step() []Event {
 				return append(out, h.finish(true)...)
 			}
 			h.turn = next
-			return append(out, h.yourTurn())
+			return append(out, h.turnEvents()...)
 		}
 		if h.street == River {
 			return append(out, h.finish(true)...)
@@ -581,6 +581,24 @@ func (h *Hand) forcedAction(i int) Action {
 }
 
 // --- 事件构造 ---
+
+// turnEvents 是「轮到某人了」该发出去的全部事件：一条广播说轮到谁，
+// 一条只给当事人、带上他决策需要的一切。
+//
+// 合成一个函数是故意的：谁在行动是一件事实，不该有两个出处。分开写的话，
+// 迟早有人在某条路径上只发了其中一条——而那时全桌看到的「谁在想牌」
+// 就和真正握有行动权的人对不上了，这种错还特别难看出来。
+func (h *Hand) turnEvents() []Event {
+	return []Event{
+		{
+			Type:   EventTurn,
+			Hand:   h.number,
+			Player: h.seats[h.turn].player,
+			Street: h.street.String(),
+		},
+		h.yourTurn(),
+	}
+}
 
 func (h *Hand) yourTurn() Event {
 	s := h.seats[h.turn]

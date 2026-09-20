@@ -68,6 +68,11 @@ type liveView struct {
 	hole   []poker.Card
 	log    []string
 
+	// acting 是牌桌此刻在等谁行动，空串表示没人在行动。
+	//
+	// 这是服务端广播的 turn 事件告诉我们的，不是自己按座位顺序推出来的——
+	// 客户端一旦开始自己算轮次，就会和服务端算出分歧（ADR-0003）。
+	acting string
 	// turn 非空表示正轮到我，里面是服务端给的那份快照。
 	turn *poker.Snapshot
 	// note 是最近一条要提醒的话（错误、帮助之类），显示到下一条事件为止。
@@ -130,12 +135,15 @@ func (v *liveView) apply(ev poker.Event) {
 
 	switch ev.Type {
 	case poker.EventHandStart:
+		// 先把刚打完那一手永久留在终端上，再清屏开新的一手。
+		v.commit()
 		// 新的一手，把上一手的东西全清掉——这正是「只展示正在玩的」那句话的落点。
 		// 底池也在内：hand_start 不带底池，不清的话上一手的数字会一直挂着，
 		// 直到第一个盲注把它盖掉，中间那几帧是在说谎。
 		v.hand, v.street = ev.Hand, "preflop"
 		v.board, v.hole, v.log = nil, nil, nil
 		v.turn, v.over, v.note = nil, false, ""
+		v.acting = ""
 		v.pot = 0
 		if ev.Pot != nil {
 			v.pot = *ev.Pot
@@ -153,6 +161,8 @@ func (v *liveView) apply(ev poker.Event) {
 		if ev.Player == v.me {
 			v.hole = ev.Cards
 		}
+	case poker.EventTurn:
+		v.acting = ev.Player
 	case poker.EventYourTurn:
 		v.turn = ev.Snapshot
 		if ev.Snapshot != nil {
@@ -163,7 +173,8 @@ func (v *liveView) apply(ev poker.Event) {
 			v.seats = ev.Snapshot.Seats
 		}
 	case poker.EventAction:
-		v.turn = nil
+		// 他动过了，牌桌不再等他。下一条 turn 会说出在等谁。
+		v.turn, v.acting = nil, ""
 		v.addLog("%s", logLine(v.who(ev.Player), actionWhat(ev), actionPot(ev)))
 		v.patchSeat(ev)
 	case poker.EventStreet:
@@ -182,7 +193,7 @@ func (v *liveView) apply(ev poker.Event) {
 			v.addLog("%s %d → %s", label, pot.Amount, strings.Join(pot.Winners, "、"))
 		}
 	case poker.EventHandEnd:
-		v.over, v.turn = true, nil
+		v.over, v.turn, v.acting = true, nil, ""
 	case poker.EventError:
 		v.note = fmt.Sprintf("✗ [%s] %s", ev.Code, ev.Message)
 	case poker.EventJoined, poker.EventLeft, poker.EventSitOut, poker.EventSitIn, poker.EventTopUp:
@@ -278,6 +289,46 @@ func (v *liveView) typed() {
 	}
 }
 
+// commit 把刚打完那一手永久地留在终端上，之后的重画从它下面重新开始。
+//
+// 「只展示正在玩的」（ADR-0017）说的是**正在动的那一帧**，不是说打完就得抹掉。
+// 这两件事靠这个函数分开：一手结束时，把它的记录当普通输出打一次——那几行从此
+// 归终端的回滚缓冲管，往上翻就能看见；然后把上移行数归零，新的一手在它下面重新开帧。
+//
+// 归零这一步是关键。不归零的话，下一帧会往上挪到刚刚留下的记录里去改写它，
+// 那就既没保住记录，也把屏幕搅乱了。
+func (v *liveView) commit() {
+	if v.hand == 0 || len(v.log) == 0 {
+		return
+	}
+	var b strings.Builder
+	if v.up > 0 {
+		fmt.Fprintf(&b, "\033[%dA", v.up)
+	}
+	b.WriteString("\r\033[J")
+	b.WriteString(v.record())
+	fmt.Fprint(v.out, b.String())
+	v.up = 0
+}
+
+// record 是留在终端上的那份「上一手」：标题加全部流水。
+//
+// 不留座位表和公共牌：它们在流水里已经有了（街分隔线带着牌面，底池跟在每个动作后面），
+// 而座位表是「此刻各家多少筹码」——那是给正在打的那手用的，留在历史里只会让人误读。
+func (v *liveView) record() string {
+	var b strings.Builder
+	head := fmt.Sprintf("第 %d 手", v.hand)
+	if v.blinds != "" {
+		head += "  盲注 " + v.blinds
+	}
+	fmt.Fprintf(&b, "%s\n", textui.Bold(head))
+	for _, l := range v.log {
+		fmt.Fprintf(&b, "  %s\n", l)
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
 // render 就地重画一帧。
 func (v *liveView) render() {
 	frame := v.frame()
@@ -366,6 +417,9 @@ func (v *liveView) headAndSeats() string {
 		}
 		if s.Player == v.me && len(v.hole) > 0 {
 			line += "   " + textui.Cards(v.hole)
+		}
+		if s.Player == v.acting {
+			line += "   行动中…"
 		}
 		fmt.Fprintf(&b, "%s\n", line)
 	}

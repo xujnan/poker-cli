@@ -14,6 +14,36 @@ import (
 
 func ptr(n int) *int { return &n }
 
+// seatRows 从一帧里取出座位区那几行。
+//
+// 按结构取，不靠字符串长相猜：座位区是标题底下那一块，到空行或公共牌那行为止。
+// 猜过三次都猜错了——流水行长得跟座位行很像（都以两格缩进加人名开头，
+// 现在名字后面还跟着括号里的位置），而它们说的是两件完全不同的事。
+func seatRows(frame string) []string {
+	lines := strings.Split(frame, "\n")
+	var out []string
+	for _, l := range lines[1:] {
+		if strings.TrimSpace(l) == "" || strings.HasPrefix(l, "公共牌") {
+			if len(out) > 0 {
+				break
+			}
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
+// feedRender 走真正那条路：并进状态之后重画一帧。
+//
+// feed 只攒状态不画，断言帧内容时够用；但凡断言跟重画有关的东西（上移几行、
+// 有没有把记录留在终端上），就必须走这条。
+func feedRender(v *liveView, evs ...poker.Event) {
+	for _, ev := range evs {
+		_ = v.event(ev, nil)
+	}
+}
+
 // feed 把一串事件喂进视图，只攒状态不画，方便断言 frame 的内容。
 func feed(v *liveView, evs ...poker.Event) {
 	for _, ev := range evs {
@@ -427,10 +457,8 @@ func TestLogColumnsLineUp(t *testing.T) {
 	// 筹码是右对齐的，所以比的是那一列的起点——正好是名字列加位置列。
 	frame := v.frame()
 	var seatLine string
-	for _, l := range strings.Split(frame, "\n") {
-		// 流水里那一行也以 "  Ken " 开头、也含 BTN（就在括号里），
-		// 所以靠括号把两者分开——这正是这次改动引入的歧义。
-		if strings.HasPrefix(l, "  Ken ") && !strings.Contains(l, "(") {
+	for _, l := range seatRows(frame) {
+		if strings.Contains(l, "Ken") {
 			seatLine = l
 		}
 	}
@@ -531,5 +559,72 @@ func TestLogPotColumnLinesUp(t *testing.T) {
 		if col != want {
 			t.Fatalf("底池从第 %d 列开始，别的行是第 %d 列：%q", col, want, l)
 		}
+	}
+}
+
+// TestActingPlayerIsMarked：牌桌在等谁，座位表上要看得出来。
+//
+// 这条信息只能来自服务端广播的 turn 事件。客户端自己按座位顺序推「下一个该谁」
+// 是行得通但错的：弃牌、全下、暂离都会让顺序拐弯，推错了屏幕就在骗人，
+// 而权威只有一个（ADR-0003）。
+func TestActingPlayerIsMarked(t *testing.T) {
+	v := newLiveView(&strings.Builder{}, "我")
+	feed(v, handOne()...)
+	feed(v, poker.Event{Type: poker.EventTurn, Player: "bot1"})
+
+	frame := v.frame()
+	for _, l := range seatRows(frame) {
+		marked := strings.Contains(l, "行动中")
+		isBot1 := strings.Contains(l, "bot1")
+		if isBot1 && !marked {
+			t.Fatalf("bot1 那一行该标着行动中：%q\n%s", l, frame)
+		}
+		if !isBot1 && marked {
+			t.Fatalf("不该是 bot1 之外的人在行动：%q\n%s", l, frame)
+		}
+	}
+
+	// 他动完了，牌桌就不再等他——下一条 turn 会说出在等谁。
+	feed(v, poker.Event{Type: poker.EventAction, Player: "bot1", Action: "fold", Stack: ptr(200)})
+	if strings.Contains(v.frame(), "行动中") {
+		t.Fatalf("动作已经发生，不该还挂着行动中：\n%s", v.frame())
+	}
+}
+
+// TestFinishedHandIsKeptInScrollback：打完的一手留在终端上，新的一手在它下面重新开。
+//
+// ADR-0017 那句「只展示正在玩的」说的是**正在动的那一帧**，不是打完就抹掉。
+// 两件事在这里分开：记录作为普通输出打一次，从此归终端的回滚缓冲管；
+// 实时帧的上移行数归零，于是它在记录下面重新开始，不会回头把记录改写掉。
+func TestFinishedHandIsKeptInScrollback(t *testing.T) {
+	var out strings.Builder
+	v := newLiveView(&out, "我")
+	feedRender(v, handOne()...)
+
+	out.Reset()
+	feedRender(v,
+		poker.Event{Type: poker.EventHandEnd, Hand: 1, Pot: ptr(6)},
+		poker.Event{Type: poker.EventHandStart, Hand: 2, Blinds: "1/2", Seats: []poker.SeatView{
+			{Player: "我", Stack: 198, Position: "SB"},
+		}})
+	got := out.String()
+
+	// 上一手的流水被永久打了出去。
+	for _, want := range []string{"第 1 手", "小盲 1", "翻牌"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("上一手的记录里该有 %q：\n%q", want, got)
+		}
+	}
+	// 而新的一帧必须从记录**下面**开始画：commit 之后那一次重画不许再往回挪，
+	// 挪了就会爬上去把刚留下的记录改写掉——那是既没保住记录、又搅乱了屏幕。
+	if last := strings.LastIndex(got, "\r\033[J"); last > 0 && got[last-1] == 'A' {
+		t.Fatalf("commit 之后那一帧又往回挪了，会把刚留下的记录改写掉：\n%q", got)
+	}
+	if v.up != strings.Count(v.frame(), "\n") {
+		t.Fatalf("新帧的上移行数该等于它自己的行数，得到 %d", v.up)
+	}
+	// 记录归记录，正在打的那一帧还是干净的。
+	if strings.Contains(v.frame(), "第 1 手") {
+		t.Fatalf("第 2 手的帧里不该还有第 1 手：\n%s", v.frame())
 	}
 }
