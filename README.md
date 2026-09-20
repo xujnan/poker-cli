@@ -2,6 +2,9 @@
 
 在本机多个终端之间对战的无限注德州扑克命令行程序，同时是一个给 AI agent 用的可对战环境。
 
+**想直接开一局打：[docs/quickstart.md](docs/quickstart.md)**——开房、叫人、屏幕上是什么、卡住了怎么办，一分钟能坐下。
+**想接一个 agent 进来：[docs/agent.md](docs/agent.md)**。
+
 术语以 [CONTEXT.md](CONTEXT.md) 为准，架构决策记在 [docs/adr/](docs/adr/)。动手改之前先读这两处。
 
 ## 跑起来
@@ -9,15 +12,15 @@
 ```sh
 go build -o poker ./cmd/poker
 
-# 开一张牌桌，它会打印 Table Code
-./poker serve --blinds 1/2 --hand-delay 1s
-
-# 另开终端，用打印出来的码坐下
-./poker join ABC234 --as alice
-
-# 再开一个，让机器人坐下（独立进程，走的是和外部 agent 完全相同的接口）
-./poker bot ABC234 --as bot1
+./poker serve --code TABLE1 >/dev/null 2>&1 &   # 开桌
+sleep 1                                          # 等 socket 建好，不然机器人会连空
+./poker bot TABLE1 --as bot1 --rebuy >/dev/null 2>&1 &
+./poker bot TABLE1 --as bot2 --rebuy >/dev/null 2>&1 &
+./poker join TABLE1 --as 我                      # 自己坐下
 ```
+
+要跟别人打就各开各的终端，把 `serve` 打印出来的 Table Code 报给他们——细节和排错都在
+[快速开始](docs/quickstart.md)里。
 
 凑够两个有筹码的人就自动开牌，此后每 `--hand-delay` 开下一手，不需要任何人确认（ADR-0014）。
 轮到你的时候直接敲 `call`、`check`、`fold`、`allin` 或 `bet 100`；
