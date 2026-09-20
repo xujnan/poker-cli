@@ -40,6 +40,11 @@ type Options struct {
 	Blinds poker.Blinds
 	// Buyin 是玩家没指定时的默认带入。
 	Buyin int
+	// MaxBuyin 是一个人在这张桌上最多能有多少筹码，0 表示不设上限（默认）。
+	//
+	// 设了的话，join 和补码两边一起管——只管一边等于没管：以前只有补码有上限，
+	// 而直接带着一百万坐下是放行的，想变成最深的筹码根本不用走补码那条路。
+	MaxBuyin int
 	// MaxHands 是打满多少手就收桌，0 表示一直打下去。
 	// 无人值守的 agent 评测要的是「跑 N 手然后停」，不是「跑到有人来杀进程」。
 	MaxHands int
@@ -80,6 +85,7 @@ type Server struct {
 	timeout   time.Duration
 	blinds    poker.Blinds
 	buyin     int
+	maxBuyin  int
 	maxHands  int
 	log       *log.Logger
 
@@ -121,6 +127,9 @@ func New(opts Options) (*Server, error) {
 	if opts.Buyin < opts.Blinds.Big {
 		return nil, fmt.Errorf("server: 默认带入 %d 还不够一个大盲", opts.Buyin)
 	}
+	if opts.MaxBuyin > 0 && opts.MaxBuyin < opts.Buyin {
+		return nil, fmt.Errorf("server: 带入上限 %d 比默认带入 %d 还小", opts.MaxBuyin, opts.Buyin)
+	}
 	if opts.Transport == nil {
 		return nil, errors.New("server: 必须指定传输方式")
 	}
@@ -136,6 +145,7 @@ func New(opts Options) (*Server, error) {
 		timeout:   opts.ActionTimeout,
 		blinds:    opts.Blinds,
 		buyin:     opts.Buyin,
+		maxBuyin:  opts.MaxBuyin,
 		maxHands:  opts.MaxHands,
 		log:       log.New(logOut, "", log.LstdFlags),
 		reqs:      make(chan request, 64),
@@ -558,6 +568,15 @@ func (s *Server) handleJoin(c *conn, cmd protocol.Command) {
 		c.shutdown()
 		return
 	}
+	if s.maxBuyin > 0 && buyin > s.maxBuyin {
+		c.send(poker.Event{
+			Type: poker.EventError, Code: "buyin_too_big",
+			Message: fmt.Sprintf("这张桌的带入上限是 %d", s.maxBuyin),
+			Max:     s.maxBuyin,
+		})
+		c.shutdown()
+		return
+	}
 
 	c.name = name
 	s.seats = append(s.seats, &seat{name: name, stack: buyin, c: c})
@@ -577,6 +596,7 @@ func (s *Server) sendTable(c *conn, name string) {
 		To:       name,
 		Player:   name,
 		Protocol: poker.ProtocolVersion,
+		Buyin:    s.buyin,
 		Players:  s.seatNames(),
 		Seats:    s.seatViews(),
 		Blinds:   s.blinds.String(),
@@ -745,23 +765,26 @@ func (s *Server) handleTopUp(st *seat, amount int) {
 		st.c.send(poker.Event{Type: poker.EventError, Code: "bad_amount", Message: "补码要带一个正数额"})
 		return
 	}
-	// 上限是牌桌的带入线：没有上限的话，谁都能在任意时刻把自己变成桌上最深的筹码（ADR-0015）。
-	room := s.buyin - (st.stack + st.pendingTopUp)
-	if room <= 0 {
-		st.c.send(poker.Event{
-			Type: poker.EventError, Code: "stack_at_max",
-			Message: fmt.Sprintf("你已经有 %d 了，这张桌的带入线是 %d", st.stack+st.pendingTopUp, s.buyin),
-			Max:     s.buyin,
-		})
-		return
-	}
-	if amount > room {
-		st.c.send(poker.Event{
-			Type: poker.EventError, Code: "topup_too_big",
-			Message: fmt.Sprintf("最多还能补 %d（带入线 %d）", room, s.buyin),
-			Max:     room,
-		})
-		return
+	// 上限默认不设（ADR-0015）。设了的话 join 和补码两边用同一条线——
+	// 只管一边等于没管：想变成桌上最深的筹码，直接带着一百万坐下就行，不必走补码。
+	if s.maxBuyin > 0 {
+		room := s.maxBuyin - (st.stack + st.pendingTopUp)
+		if room <= 0 {
+			st.c.send(poker.Event{
+				Type: poker.EventError, Code: "stack_at_max",
+				Message: fmt.Sprintf("你已经有 %d 了，这张桌的带入上限是 %d", st.stack+st.pendingTopUp, s.maxBuyin),
+				Max:     s.maxBuyin,
+			})
+			return
+		}
+		if amount > room {
+			st.c.send(poker.Event{
+				Type: poker.EventError, Code: "topup_too_big",
+				Message: fmt.Sprintf("最多还能补 %d（带入上限 %d）", room, s.maxBuyin),
+				Max:     room,
+			})
+			return
+		}
 	}
 
 	st.pendingTopUp += amount
@@ -782,9 +805,23 @@ func (s *Server) applyPendingTopUps() {
 		if st.pendingTopUp <= 0 {
 			continue
 		}
-		add := min(st.pendingTopUp, s.buyin-st.stack)
+		// 没设上限就照单全收；设了才在落地时再看一眼。
+		//
+		// 落地时还要看一眼，是因为 handleTopUp 收下它的时候筹码还是另一个数：
+		// 牌局中途发的补码要等这手打完，而这手里他可能赢了一大把。那时候
+		// 回头拒绝他已经收下的东西更糟，所以这里截断——但要说出来，
+		// 不能像以前那样闷声把数改掉。
+		add := st.pendingTopUp
+		if s.maxBuyin > 0 {
+			add = min(add, s.maxBuyin-st.stack)
+		}
 		st.pendingTopUp = 0
 		if add <= 0 {
+			st.c.send(poker.Event{
+				Type: poker.EventError, Code: "stack_at_max", To: st.name,
+				Message: fmt.Sprintf("这手打完你已经有 %d 了，到了带入上限 %d，补码没落地", st.stack, s.maxBuyin),
+				Max:     s.maxBuyin,
+			})
 			continue
 		}
 		st.stack += add

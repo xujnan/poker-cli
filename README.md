@@ -171,7 +171,8 @@ ADR-0006 那套可见性规矩管的是事件，不是这个文件。别把记�
 - 四条 Street 的完整下注轮，大盲在 preflop 的 option
 - bet / call / check / fold / allin，最小加注额、不足额 all-in 不重开下注轮
 - 主池与边池按投入额分层，未被匹配的注额原样退还，平分除不尽时按位置发
-- Stack、Buy-in、Top-up（补码），输光自动进入 Sitting Out，补了码就回来
+- Stack、Buy-in、Top-up（补码），输光自动进入 Sitting Out，补了码就回来；
+  带入上限默认不设，`--max-buyin` 想设就设，设了 `join` 和补码一起管（ADR-0015）
 - 手动 `sitout` / `sitin`；`--rebuy` 让无人值守的牌桌一直打下去
 - 断线接管与行动超时：没人能靠装死或拔网线冻住整张牌桌
 - Hand History 只追加落盘，每手一个自足的种子，`poker verify` 逐手重放校验，`poker history` 复盘与战绩

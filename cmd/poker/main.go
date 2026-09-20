@@ -66,6 +66,7 @@ func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	blindsFlag := fs.String("blinds", "1/2", "盲注，写成 小盲/大盲")
 	buyin := fs.Int("buyin", 0, "默认带入，留空则取 100 个大盲")
+	maxBuyin := fs.Int("max-buyin", 0, "一个人最多能有多少筹码（join 和补码都管），留空则不设上限")
 	seed := fs.Uint64("seed", 0, "洗牌随机种子，0 表示每次都不一样。给定同一个种子，牌序完全可复现")
 	handDelay := fs.Duration("hand-delay", 3*time.Second, "两手牌之间的间隔，自对弈时设 0")
 	hands := fs.Int("hands", 0, "打满多少手就收桌，0 表示一直打下去")
@@ -103,6 +104,7 @@ func runServe(args []string) error {
 		ActionTimeout: *timeout,
 		Blinds:        blinds,
 		Buyin:         *buyin,
+		MaxBuyin:      *maxBuyin,
 		Log:           os.Stderr,
 	})
 	if err != nil {

@@ -151,9 +151,13 @@ func TestBotOnlyPicksLegalActions(t *testing.T) {
 func TestRebuyerIgnoresAllInMidHand(t *testing.T) {
 	r := rebuyer{name: "me", enabled: true}
 
-	// 入座，记住带入。
+	// 入座，从 table 事件里拿到这张桌的默认带入——补码就补到这个数。
+	//
+	// 以前这里是靠「第一次看见自己有多少筹码」猜的，而那个猜测在输光之后重连时
+	// 必然落空（座位上本来就是 0），--rebuy 于是一声不吭，人卡在 0 筹码。
 	if _, ok := r.observe(poker.Event{
 		Type:  poker.EventTable,
+		Buyin: 100,
 		Seats: []poker.SeatView{{Player: "me", Stack: 100}},
 	}); ok {
 		t.Fatal("刚入座就补码？")

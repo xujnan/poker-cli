@@ -8,6 +8,7 @@ import (
 	"github.com/xujnan/poker-cli/internal/client"
 	"github.com/xujnan/poker-cli/internal/poker"
 	"github.com/xujnan/poker-cli/internal/protocol"
+	"github.com/xujnan/poker-cli/internal/transport"
 )
 
 func dialWith(t *testing.T, s *Server, name string, buyin int) *client.Session {
@@ -397,9 +398,19 @@ func TestBustedPlayerComesBackByToppingUp(t *testing.T) {
 	}
 }
 
-// TestTopUpBeyondTheCapIsRejected：补码不能越过牌桌的带入线（ADR-0015）。
+// cappedTable 开一张带入上限等于默认带入的桌——「顶格就不能再补」那套规矩的经典形状。
+func cappedTable(t *testing.T) *Server {
+	t.Helper()
+	tr, err := transport.NewUnix(t.TempDir())
+	if err != nil {
+		t.Fatalf("造不出传输: %v", err)
+	}
+	return startTableCapped(t, tr, time.Hour, 0, testBuyin)
+}
+
+// TestTopUpBeyondTheCapIsRejected：设了上限之后，补码不能越过它（ADR-0015）。
 func TestTopUpBeyondTheCapIsRejected(t *testing.T) {
-	s := startTable(t, time.Hour)
+	s := cappedTable(t)
 	alice := dialWith(t, s, "alice", testBuyin) // 已经顶格了
 	drainTable(t, alice)
 
@@ -411,7 +422,7 @@ func TestTopUpBeyondTheCapIsRejected(t *testing.T) {
 
 // TestTopUpTooBigIsRejectedWithTheRoomLeft：补多了不是静默截断，而是告诉他还能补多少。
 func TestTopUpTooBigIsRejectedWithTheRoomLeft(t *testing.T) {
-	s := startTable(t, time.Hour)
+	s := cappedTable(t)
 	alice := dialWith(t, s, "alice", 150)
 	drainTable(t, alice)
 
@@ -453,5 +464,153 @@ func drainTable(t *testing.T, sess *client.Session) {
 	t.Helper()
 	if _, _, err := sess.Next(); err != nil {
 		t.Fatalf("没收到牌桌快照: %v", err)
+	}
+}
+
+// TestNoCapByDefault：默认这张桌不管你有多少筹码，补码想补多少补多少。
+//
+// 以前上限是写死的，而且只拦补码这一条路——本地几个人打着玩、或者跑 agent 评测时，
+// 「想深筹码打就深筹码打」才是常态，不该被一个默认值拦住。
+func TestNoCapByDefault(t *testing.T) {
+	s := startTable(t, time.Hour)
+	alice := dialWith(t, s, "alice", testBuyin) // 已经是默认带入了
+	drainTable(t, alice)
+
+	const way = testBuyin * 50
+	if err := alice.Send(protocol.Command{Type: protocol.CmdTopUp, Amount: way}); err != nil {
+		t.Fatalf("发补码失败: %v", err)
+	}
+	got := make(chan poker.Event, 1)
+	go func() {
+		for {
+			ev, _, err := alice.Next()
+			if err != nil {
+				return
+			}
+			if ev.Type == poker.EventTopUp || ev.Type == poker.EventError {
+				got <- ev
+				return
+			}
+		}
+	}()
+	select {
+	case ev := <-got:
+		if ev.Type == poker.EventError {
+			t.Fatalf("默认不该有上限，却被 %s 拦下了：%s", ev.Code, ev.Message)
+		}
+		if ev.Stack == nil || *ev.Stack != testBuyin+way {
+			t.Fatalf("补完该有 %d，事件说 %+v", testBuyin+way, ev.Stack)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("等补码到账超时")
+	}
+}
+
+// TestCapCoversJoinToo：设了上限，带着超额的钱直接坐下也要被拦。
+//
+// 这是一个真漏洞的回归测试：以前上限只写在补码那条路上，而 join 一分钱不限——
+// 一张默认带入 200 的桌，`--buyin 999999` 直接就坐下了。想变成桌上最深的筹码
+// 根本不用走补码，那条上限于是只是个摆设。规矩要么两边都管，要么两边都不管。
+func TestCapCoversJoinToo(t *testing.T) {
+	s := cappedTable(t)
+	over, err := client.Dial(s.Transport(), s.Code(), "土豪", testBuyin*100)
+	if err != nil {
+		t.Fatalf("连不上: %v", err)
+	}
+	defer over.Close()
+
+	ev, _, err := over.Next()
+	if err != nil {
+		t.Fatalf("该收到一条错误，却读不到: %v", err)
+	}
+	if ev.Type != poker.EventError || ev.Code != "buyin_too_big" {
+		t.Fatalf("该被 buyin_too_big 拦下，得到 %+v", ev)
+	}
+	if ev.Max != testBuyin {
+		t.Fatalf("错误里该带着上限 %d，得到 %d", testBuyin, ev.Max)
+	}
+
+	// 没设上限的桌上，同样的带入要放行——否则就是把默认值又变回了硬规矩。
+	plain := startTable(t, time.Hour)
+	rich, err := client.Dial(plain.Transport(), plain.Code(), "土豪", testBuyin*100)
+	if err != nil {
+		t.Fatalf("连不上: %v", err)
+	}
+	defer rich.Close()
+	ev, _, err = rich.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Type != poker.EventTable {
+		t.Fatalf("没设上限的桌该直接让他坐下，得到 %+v", ev)
+	}
+}
+
+// TestRebuyWorksAfterReconnect 是一个真 bug 的回归测试。
+//
+// 输光之后断线、再用 `join --as 同一个名字 --rebuy` 连回来，--rebuy 一声不吭，
+// 人就卡在 0 筹码 Sitting Out，牌桌上白少一个人。
+//
+// 原因是补码目标是**猜**出来的：「第一次看见自己有多少筹码」。这个猜测在别的路上
+// 都成立，唯独这一条上必然落空——重连时座位上本来就是 0，于是永远学不到目标。
+// 现在不猜了：自己报的带入自己知道，牌桌的默认值写在 table 事件里。
+func TestRebuyWorksAfterReconnect(t *testing.T) {
+	s := startTableWithTimeout(t, 5*time.Millisecond, 50*time.Millisecond)
+	bob := dial(t, s, "bob")
+	keepPlaying(t, bob)
+
+	alice := dialWith(t, s, "alice", aliceBuyin)
+	busted := make(chan struct{})
+	go func() {
+		var once bool
+		for {
+			ev, _, err := alice.Next()
+			if err != nil {
+				return
+			}
+			if ev.Type == poker.EventYourTurn && ev.Snapshot != nil {
+				_ = alice.Send(protocol.CommandOf(poker.Action{Kind: poker.Fold}))
+			}
+			if !once && ev.Type == poker.EventSitOut && ev.Player == "alice" && ev.Message == "筹码输光了" {
+				once = true
+				close(busted)
+			}
+		}
+	}()
+	select {
+	case <-busted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("alice 没输光")
+	}
+	alice.Close()
+
+	// 重连，带 --rebuy。
+	back, err := client.Dial(s.Transport(), s.Code(), "alice", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer back.Close()
+	go func() { _ = client.RunBotWith(back, io.Discard, true, foldAlways) }()
+
+	// 找个只看不玩的观察者来盯，bob 的事件流已经被 keepPlaying 吃掉了。
+	watch := dial(t, s, "watch")
+	seen := make(chan int, 1)
+	go func() {
+		for {
+			ev, _, err := watch.Next()
+			if err != nil {
+				return
+			}
+			if ev.Type == poker.EventTopUp && ev.Player == "alice" && ev.Stack != nil {
+				seen <- *ev.Stack
+				return
+			}
+		}
+	}()
+	select {
+	case got := <-seen:
+		t.Logf("补上了，现在有 %d", got)
+	case <-time.After(3 * time.Second):
+		t.Fatal("重连之后 --rebuy 没有补码，alice 永远停在 0 筹码")
 	}
 }

@@ -25,6 +25,11 @@ func TestTableEventCarriesProtocolVersion(t *testing.T) {
 	if ev.Protocol != poker.ProtocolVersion {
 		t.Fatalf("协议版本该是 %d，得到 %d", poker.ProtocolVersion, ev.Protocol)
 	}
+	// 这张桌的默认带入也必须在第一条事件里。--rebuy 靠它决定补到多少，
+	// 缺了它，输光之后重连的人就永远补不上（见 TestRebuyWorksAfterReconnect）。
+	if ev.Buyin != testBuyin {
+		t.Fatalf("table 事件该带着默认带入 %d，得到 %d", testBuyin, ev.Buyin)
+	}
 
 	// 线路上那一行也得真有这个键——结构体里有、JSON 里被 omitempty 吃掉的话，
 	// agent 什么也看不见。ProtocolVersion 是 0 的那天，这条会提醒你 omitempty 的坑。

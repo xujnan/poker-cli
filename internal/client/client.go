@@ -23,6 +23,8 @@ type Session struct {
 	conn   net.Conn
 	events *protocol.EventReader
 	name   string
+	// buyin 是自己报上去的带入，0 表示「用牌桌的默认值」。补码要补到多少，从这儿来。
+	buyin int
 }
 
 // Dial 连上 Table Code 对应的牌桌并报上名字与带入。
@@ -39,11 +41,14 @@ func Dial(tr transport.Transport, code, name string, buyin int) (*Session, error
 		conn.Close()
 		return nil, fmt.Errorf("client: 加入牌桌失败: %w", err)
 	}
-	return &Session{conn: conn, events: protocol.NewEventReader(conn), name: name}, nil
+	return &Session{conn: conn, events: protocol.NewEventReader(conn), name: name, buyin: buyin}, nil
 }
 
 // Name 返回自己在牌桌上的名字。
 func (s *Session) Name() string { return s.name }
+
+// Buyin 返回自己报上去的带入，0 表示用的是牌桌的默认值。
+func (s *Session) Buyin() int { return s.buyin }
 
 // Next 读下一条事件，同时给出服务端发来的原始那一行。
 func (s *Session) Next() (poker.Event, []byte, error) { return s.events.Next() }
@@ -99,7 +104,7 @@ func Play(s *Session, format string, out io.Writer, in io.Reader, rebuy bool) er
 		}()
 	}
 
-	buy := rebuyer{name: s.Name(), enabled: rebuy}
+	buy := rebuyer{name: s.Name(), enabled: rebuy, target: s.Buyin()}
 	v.start()
 	for {
 		select {
@@ -216,7 +221,7 @@ func RunBot(s *Session, out io.Writer, rebuy bool) error {
 //
 // 将来做 agent 评测时，「同一套接口换不同的大脑」也正是要的形状。
 func RunBotWith(s *Session, out io.Writer, rebuy bool, decide func(*poker.Snapshot) poker.Action) error {
-	buy := rebuyer{name: s.Name(), enabled: rebuy}
+	buy := rebuyer{name: s.Name(), enabled: rebuy, target: s.Buyin()}
 	for {
 		ev, _, err := s.Next()
 		if err != nil {
@@ -252,7 +257,12 @@ func RunBotWith(s *Session, out io.Writer, rebuy bool, decide func(*poker.Snapsh
 type rebuyer struct {
 	name    string
 	enabled bool
-	// target 是第一次看到自己时的筹码，也就是最初的带入。
+	// target 是补到多少：自己报上去的带入；没报就用牌桌的默认值（从 table 事件来）。
+	//
+	// 这里曾经是猜的——「第一次看见自己有多少筹码」。那个猜测在一条路上必然落空：
+	// 输光之后断线重连，座位上本来就是 0，于是 target 永远学不到，--rebuy 一声不吭，
+	// 人就卡在 0 筹码 Sitting Out，牌桌上白少一个人。所以不再猜：
+	// 自己报的带入自己知道，牌桌的默认值写在收到的第一条事件里。
 	target int
 	// waiting 表示已经发过补码、还没等到到账，免得同一次破产连发好几条。
 	waiting bool
@@ -266,6 +276,10 @@ func (r *rebuyer) observe(ev poker.Event) (protocol.Command, bool) {
 		r.waiting = false
 		return protocol.Command{}, false
 	}
+	// 没自己报带入的话，用牌桌的默认值——它就写在坐下之后的第一条事件里。
+	if ev.Type == poker.EventTable && r.target == 0 {
+		r.target = ev.Buyin
+	}
 	// 只看两手牌之间的那几类事件。
 	//
 	// 别的事件也带座位表，但牌局中途的那些里，「筹码 0」的意思是全下——他还在这手牌里，
@@ -278,9 +292,6 @@ func (r *rebuyer) observe(ev poker.Event) (protocol.Command, bool) {
 	for _, sv := range ev.Seats {
 		if sv.Player != r.name {
 			continue
-		}
-		if r.target == 0 && sv.Stack > 0 {
-			r.target = sv.Stack
 		}
 		if sv.Stack == 0 && r.target > 0 && !r.waiting {
 			r.waiting = true

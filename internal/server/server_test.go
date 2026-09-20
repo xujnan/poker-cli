@@ -35,6 +35,12 @@ func startTableWithTimeout(t *testing.T, handDelay, timeout time.Duration) *Serv
 // 所以这个函数收一个 Transport，测试就能拿同一套断言去跑不同的传输。
 func startTableOn(t *testing.T, tr transport.Transport, handDelay, timeout time.Duration) *Server {
 	t.Helper()
+	return startTableCapped(t, tr, handDelay, timeout, 0)
+}
+
+// startTableCapped 开一张带「带入上限」的桌；maxBuyin 为 0 表示不设上限（默认）。
+func startTableCapped(t *testing.T, tr transport.Transport, handDelay, timeout time.Duration, maxBuyin int) *Server {
+	t.Helper()
 	s, err := New(Options{
 		Transport:     tr,
 		Rand:          rand.New(rand.NewPCG(20240918, 5)),
@@ -42,6 +48,7 @@ func startTableOn(t *testing.T, tr transport.Transport, handDelay, timeout time.
 		ActionTimeout: timeout,
 		Blinds:        poker.Blinds{Small: 1, Big: 2},
 		Buyin:         testBuyin,
+		MaxBuyin:      maxBuyin,
 		Log:           io.Discard,
 	})
 	if err != nil {

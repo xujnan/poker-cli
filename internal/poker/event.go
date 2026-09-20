@@ -83,6 +83,11 @@ type Event struct {
 	// Protocol 只出现在 table 事件上，是 agent 收到的第一条消息里的第一件事实：
 	// 这张牌桌说的是哪一版协议（见 ProtocolVersion）。
 	Protocol int `json:"protocol,omitempty"`
+	// Buyin 只出现在 table 事件上，是这张桌的默认带入。
+	//
+	// 客户端要它是为了知道「补码该补到多少」。没有它的话只能猜——而唯一能猜的
+	// 「第一次看见自己有多少筹码」，在输光之后重连时恰好是 0，于是永远补不上。
+	Buyin int `json:"buyin,omitempty"`
 
 	// Pot 用指针是为了让「底池为 0」能如实出现，而不是被 omitempty 吃掉。
 	Pot  *int  `json:"pot,omitempty"`

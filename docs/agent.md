@@ -20,14 +20,16 @@ poker serve --blinds 1/2 --hand-delay 0 --hands 1000   # 打印出 Table Code
 
 名字就是身份，没有 token 也没有握手（ADR-0009）。断线之后用同一个名字再 join，座位和筹码都还在。
 
-坐下之后收到的第一条事件是 `table`，它带着这张牌桌说的是哪一版协议：
+坐下之后收到的第一条事件是 `table`，它带着这张牌桌说的是哪一版协议，以及默认带入是多少：
 
 ```json
-{"type":"table","protocol":1,"player":"agent1","players":["bot1","agent1"],
+{"type":"table","protocol":1,"buyin":200,"player":"agent1","players":["bot1","agent1"],
  "seats":[{"player":"bot1","stack":200},{"player":"agent1","stack":200}],"blinds":"1/2"}
 ```
 
-**这个数只在破坏兼容时加一。** 多一种事件、多一个可选字段不会动它——照着本文写的 agent 照样跑。
+`buyin` 是这张桌的默认带入——想在输光之后补回来，补到这个数就对了。
+
+**`protocol` 只在破坏兼容时加一。** 多一种事件、多一个可选字段不会动它——照着本文写的 agent 照样跑。
 改名、删字段、改语义才会。建议开头就看一眼，不认识就报错退出，而不是带着误解解析下去。
 
 服务端目前只是把版本说出来，不做协商：它不问你认哪一版，也不会为你降级。
@@ -133,7 +135,7 @@ LJ   HJ   CO  从 BTN 往右数回来的三个位置，CO 紧挨着 BTN
 | `call` | | 跟注。筹码不够跟满就是推光，不是错误 |
 | `bet` | `amount` | **把本轮总投入推到 `amount`**，不是「再加 `amount`」（ADR-0005） |
 | `allin` | | 推光 |
-| `topup` | `amount` | 补码。随时能发，下一手牌开始前到账，上限是牌桌的带入线（ADR-0015） |
+| `topup` | `amount` | 补码。随时能发，下一手牌开始前到账。默认不设上限；开桌时加了 `--max-buyin` 才有（ADR-0015） |
 | `sitout` / `sitin` | | 暂离 / 回座。暂离从下一手开始生效，座位和筹码都留着 |
 | `quit` | | 离座。直接断开连接是一样的效果 |
 
@@ -151,7 +153,7 @@ hand_start → blind × 2 → hole_cards → [your_turn ⇄ action]…
 
 | 事件 | 什么时候来 | 关键字段 |
 | --- | --- | --- |
-| `table` | 你刚加入，只发给你 | `protocol`、`players`、`seats`、`blinds` |
+| `table` | 你刚加入，只发给你 | `protocol`、`buyin`（这张桌的默认带入）、`players`、`seats`、`blinds` |
 | `joined` / `left` | 有人来了 / 走了 | `player`、`seats` |
 | `sit_out` / `sit_in` | 有人暂离 / 回座 | `player`、`message`（暂离的原因） |
 | `top_up` | 有人补码到账 | `player`、`amount`、`stack` |
@@ -187,8 +189,8 @@ hand_start → blind × 2 → hole_cards → [your_turn ⇄ action]…
 | `insufficient_stack` | 推太多了，`max` 是你最多能推到多少 |
 | `no_chips` | 你一分钱都没有了 |
 | `hand_over` / `no_hand` / `not_in_hand` | 现在没有你能行动的牌局 |
-| `name_taken` / `bad_name` / `buyin_too_small` | 加入牌桌被拒 |
-| `stack_at_max` / `topup_too_big` | 补码被拒，`max` 是还能补多少 |
+| `name_taken` / `bad_name` / `buyin_too_small` / `buyin_too_big` | 加入牌桌被拒。`buyin_too_big` 只在这张桌设了 `--max-buyin` 时出现，`max` 是上限 |
+| `stack_at_max` / `topup_too_big` | 补码被拒（只在设了 `--max-buyin` 的桌上出现），`max` 是还能补多少 |
 | `table_full` | 桌子坐满了（最多 9 人） |
 | `unknown_command` / `bad_action` / `bad_amount` | 命令本身有问题 |
 
