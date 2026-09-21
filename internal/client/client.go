@@ -209,15 +209,16 @@ func send(s *Session, v view, cmd protocol.Command) {
 }
 
 const helpText = `可用命令（括号里是快捷输入）：
-  fold (f)        弃牌
-  check (k)       过牌
-  call (c)        跟注
-  bet <数额> (b)  把本轮总投入推到这个数（不是「再加」这么多）
-  allin (a)       推光
+  fold (f)          弃牌
+  check             过牌
+  call              跟注
+  bet <数额> (b)    把本轮总投入推到这个数（不是「再加」这么多）
+  allin (a)         推光
   topup <数额> (t)  补码。随时能发，下一手牌开始前到账
-  sitout (so)     暂离，这手牌打完生效；座位和筹码都留着
-  sitin (si)      回座
-  help (h) / quit (q)`
+  sitout (so)       暂离，这手牌打完生效；座位和筹码都留着
+  sitin (si)        回座
+  help (h) / quit (q)
+会认错的没给单字母：check 和 call 太像，sitout 和 sitin 太像。`
 
 // RunBot 跑一个机器人客户端。
 //

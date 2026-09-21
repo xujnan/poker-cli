@@ -52,18 +52,24 @@ func (a Action) String() string {
 
 // actionAliases 是人在终端里敲的单字母快捷输入。
 //
+// 只有「不会认错」的才给：fold、bet、allin 三个词各自独一份，打出来就是那个意思。
+// check 和 call 一个都不给——它们是这张表上唯一一对看着像的动作，都以 c 开头，
+// 而认错的代价是本该过牌却跟了注，或者反过来。给其中一个而另一个没有更糟：
+// 那种规则得先想一下才敢敲，而快捷输入的全部意义就是不用想。
+//
 // 只有这里认别名。JSON 线路上的动作走 protocol.Command.Action()，那是另一个
 // switch，每个动作永远只有一种拼法——写 agent 的人不必知道别名存在，也不会
 // 收到两种写法要分别处理（ADR-0005 修订）。
-//
-// k 是 check、c 是 call，跟牌桌上的习惯走，别按首字母想当然：两个词都以 c
-// 开头，而抢到 c 的是更常用的那个。
 var actionAliases = map[string]string{
 	"f": "fold",
-	"k": "check",
-	"c": "call",
 	"b": "bet",
 	"a": "allin",
+}
+
+// ambiguous 是那些故意不给的单字母：与其猜，不如把话说清楚。
+var ambiguous = map[string]string{
+	"c": "c 是 check 还是 call？这两个太像了，谁也没拿到这个字母，都要写全",
+	"k": "过牌请写全 check——它和 call 太像，两个都没有单字母写法",
 }
 
 // ParseAction 解析 "fold"、"call"、"bet 100" 这样的输入，也认 actionAliases 里的单字母。
@@ -73,6 +79,9 @@ func ParseAction(s string) (Action, error) {
 		return Action{}, fmt.Errorf("空动作")
 	}
 	word := fields[0]
+	if msg, bad := ambiguous[word]; bad {
+		return Action{}, fmt.Errorf("%s", msg)
+	}
 	if full, ok := actionAliases[word]; ok {
 		word = full
 	}
@@ -98,7 +107,7 @@ func ParseAction(s string) (Action, error) {
 		}
 		return Action{Kind: BetTo, Amount: n}, nil
 	default:
-		return Action{}, fmt.Errorf("不认识的动作 %q，可用：fold(f)、check(k)、call(c)、bet <数额>(b)、allin(a)", fields[0])
+		return Action{}, fmt.Errorf("不认识的动作 %q，可用：fold(f)、check、call、bet <数额>(b)、allin(a)", fields[0])
 	}
 }
 

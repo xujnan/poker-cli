@@ -9,7 +9,7 @@ import "testing"
 // 的动作名发命令就该一次成功，不必知道还有第二种写法，也不必处理第二种写法
 // （ADR-0005 修订）。
 func TestWireHasExactlyOneSpellingPerAction(t *testing.T) {
-	for _, alias := range []string{"f", "k", "c", "b", "a"} {
+	for _, alias := range []string{"f", "b", "a"} {
 		cmd := Command{Type: CommandType(alias), Amount: 100}
 		if cmd.IsAction() {
 			t.Errorf("%q 不该被线路当成动作", alias)

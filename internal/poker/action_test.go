@@ -1,6 +1,9 @@
 package poker
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // 全拼和单字母必须解析成同一个 Action。写成表格是为了让「加了别名却忘了让它跟
 // 全拼走同一条路」这种错当场就露出来。
@@ -9,8 +12,6 @@ func TestShortcutsMeanTheSameThing(t *testing.T) {
 		short, full string
 	}{
 		{"f", "fold"},
-		{"k", "check"},
-		{"c", "call"},
 		{"a", "allin"},
 		{"b 100", "bet 100"},
 	} {
@@ -28,14 +29,30 @@ func TestShortcutsMeanTheSameThing(t *testing.T) {
 	}
 }
 
-// c 是 call、k 是 check。这是牌桌上的习惯，不是首字母——写反了没人会报错，
-// 只会在某一手牌里让人本该过牌却跟了注，所以钉死。
-func TestCallTakesTheCLetter(t *testing.T) {
-	if a, err := ParseAction("c"); err != nil || a.Kind != Call {
-		t.Errorf("c 应当是 call，得到 %v（err=%v）", a, err)
+// check 和 call 一个单字母都没有，而且是明着拒绝，不是撞进「不认识的动作」里。
+//
+// 这两个是命令表上唯一一对看着像的动作，都以 c 开头，而认错的代价是本该过牌
+// 却跟了注。给其中一个而另一个没有更糟：那种规则得先想一下才敢敲。
+// 所以 c 和 k 都要回一句说得清的话——这跟 sitout/sitin 不给 s 是同一条规矩。
+func TestLookalikeActionsGetNoShortcut(t *testing.T) {
+	for _, s := range []string{"c", "k"} {
+		_, err := ParseAction(s)
+		if err == nil {
+			t.Fatalf("%q 不该被认成一个动作", s)
+		}
+		if !strings.Contains(err.Error(), "check") || !strings.Contains(err.Error(), "call") {
+			t.Errorf("%q 的错误话没说清该写什么：%v", s, err)
+		}
+		if strings.Contains(err.Error(), "不认识的动作") {
+			t.Errorf("%q 是故意不给的，不是没见过的，话要说得不一样：%v", s, err)
+		}
 	}
-	if a, err := ParseAction("k"); err != nil || a.Kind != Check {
-		t.Errorf("k 应当是 check，得到 %v（err=%v）", a, err)
+	// 写全了当然认。
+	if a, err := ParseAction("check"); err != nil || a.Kind != Check {
+		t.Errorf("check 该是过牌，得到 %v（err=%v）", a, err)
+	}
+	if a, err := ParseAction("call"); err != nil || a.Kind != Call {
+		t.Errorf("call 该是跟注，得到 %v（err=%v）", a, err)
 	}
 }
 
@@ -53,7 +70,7 @@ func TestShortcutsObeyTheSameArgumentRules(t *testing.T) {
 
 // 没进表的字母不能因为「看起来像」就被认下来：认错一个字母的代价是弃掉一手牌。
 func TestUnlistedLettersStayUnknown(t *testing.T) {
-	for _, s := range []string{"F", "ca", "fo", "r", "x", "al"} {
+	for _, s := range []string{"F", "ca", "fo", "r", "x", "al", "ch"} {
 		if _, err := ParseAction(s); err == nil {
 			t.Errorf("%q 不该被认出来", s)
 		}

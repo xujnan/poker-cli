@@ -267,7 +267,7 @@ var (
 func TestPlayAcceptsShortcuts(t *testing.T) {
 	s, cmds := fakeTable(t, sampleLines)
 	var out bytes.Buffer
-	in := strings.NewReader("c\nb 40\nt 100\nso\nsi\nk\nf\na\n")
+	in := strings.NewReader("call\nb 40\nt 100\nso\nsi\ncheck\nf\na\n")
 	if err := Play(s, FormatText, &out, in, false); err != nil {
 		t.Fatal(err)
 	}
@@ -289,6 +289,26 @@ func TestPlayAcceptsShortcuts(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("第 %d 条命令是 %+v，期望 %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// TestPlayRefusesLookalikes：会认错的那几个，宁可什么都不做，只把话说清楚。
+//
+// c 是 check 还是 call 分不出来，s 是 sitout 还是 sitin 分不出来。两处猜错的代价
+// 都是真的：本该过牌却跟了注，本想回座却又暂离一手。所以一个字节都不许发出去。
+func TestPlayRefusesLookalikes(t *testing.T) {
+	for _, in := range []string{"c\n", "k\n", "s\n"} {
+		s, cmds := fakeTable(t, sampleLines)
+		var out bytes.Buffer
+		if err := Play(s, FormatText, &out, strings.NewReader(in), false); err != nil {
+			t.Fatal(err)
+		}
+		if got := <-cmds; len(got) != 1 {
+			t.Fatalf("敲 %q 时除了 join 不该发出任何命令，得到 %+v", in, got)
+		}
+		if out.Len() == 0 {
+			t.Fatalf("敲 %q 总得有句话，不能什么都不说", in)
 		}
 	}
 }
