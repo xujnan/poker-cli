@@ -653,7 +653,7 @@ func TestPreviousHandStaysOnScreen(t *testing.T) {
 		}})
 
 	got := v.frame()
-	if !strings.Contains(got, "上一手（第 1 手）") {
+	if !strings.Contains(got, "上一手（第 1 手") {
 		t.Fatalf("该留着上一手：\n%s", got)
 	}
 	if !strings.Contains(got, "底池 6 → bot1") {
@@ -669,15 +669,49 @@ func TestPreviousHandStaysOnScreen(t *testing.T) {
 			{Player: "我", Stack: 201, Position: "BB"},
 		}})
 	got = v.frame()
-	if !strings.Contains(got, "上一手（第 2 手）") {
+	if !strings.Contains(got, "上一手（第 2 手") {
 		t.Fatalf("该换成上一手是第 2 手了：\n%s", got)
 	}
 	if strings.Contains(got, "第 1 手") || strings.Contains(got, "底池 6 → bot1") {
 		t.Fatalf("再往前那手不该还占着地方：\n%s", got)
 	}
-	// 留的行数有上限，屏幕不会因为上一手打得长就被挤掉。
-	if n := strings.Count(v.prevBlock(99), "\n"); n > prevHandLines+2 {
-		t.Fatalf("上一手那一块有 %d 行，太多了：\n%s", n, v.prevBlock(99))
+	// 地方够就整手都留着，不砍成固定的几行。
+	if n := strings.Count(v.prevBlock(99), "\n"); n != len(v.prev)+1+strings.Count(v.spacer(), "\n") {
+		t.Fatalf("地方够的时候该把上一手画全，画了 %d 行、存着 %d 条：\n%s",
+			n, len(v.prev), v.prevBlock(99))
+	}
+}
+
+// TestTrimmedPreviousHandSaysSo：上一手被裁了，标题里要说一声。
+//
+// 一块砍过头的记录和一手本来就短的牌长得一模一样。不说的话，人会以为自己
+// 看到的就是全部——这一屏说的每一句话都得是真的，包括「这是全部」这句。
+func TestTrimmedPreviousHandSaysSo(t *testing.T) {
+	v := newLiveView(&strings.Builder{}, "我")
+	feed(v, poker.Event{Type: poker.EventHandStart, Hand: 1, Blinds: "1/2"})
+	for i := 0; i < 12; i++ {
+		v.addLog("第 %d 条", i)
+	}
+	feed(v, poker.Event{Type: poker.EventHandStart, Hand: 2, Blinds: "1/2"})
+
+	full := v.prevBlock(99)
+	if strings.Contains(full, "略去") {
+		t.Fatalf("地方够的时候不该说裁过：\n%s", full)
+	}
+	if !strings.Contains(full, "第 0 条") {
+		t.Fatalf("地方够就该从头画：\n%s", full)
+	}
+
+	// 只给 6 行：标题 + 4 条 + 空行，开头那 9 条得裁掉。
+	cut := v.prevBlock(6)
+	if !strings.Contains(cut, "略去开头 9 行") {
+		t.Fatalf("裁了 9 条就要说裁了 9 条：\n%s", cut)
+	}
+	if strings.Contains(cut, "第 0 条") {
+		t.Fatalf("裁的该是开头：\n%s", cut)
+	}
+	if !strings.Contains(cut, "第 12 条") && !strings.Contains(cut, "第 11 条") {
+		t.Fatalf("结尾必须留着——回头看的就是那儿：\n%s", cut)
 	}
 }
 
@@ -1104,7 +1138,7 @@ func TestPreviousHandYieldsFirst(t *testing.T) {
 		bigTable(v)
 		return v.frame()
 	}
-	if f := at(40); !strings.Contains(f, "上一手（第 7 手）") || !strings.Contains(f, "Marco (CO)         过牌") {
+	if f := at(40); !strings.Contains(f, "上一手（第 7 手") || !strings.Contains(f, "Marco (CO)         过牌") {
 		t.Fatalf("屏幕够高就该把上一手留全：\n%s", f)
 	}
 	if f := at(9); strings.Contains(f, "上一手") {

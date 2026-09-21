@@ -206,7 +206,7 @@ func TestLiveOnARealTerminalLeavesNoResidue(t *testing.T) {
 		t.Fatalf("屏幕上有 %d 个「第 3 手」，该只有一份：\n%s", n, final)
 	}
 	// 第 2 手作为「上一手」留着一小块；第 1 手早该让位了。
-	if !strings.Contains(final, "上一手（第 2 手）") {
+	if !strings.Contains(final, "上一手（第 2 手") {
 		t.Fatalf("上一手该留在屏幕上：\n%s", final)
 	}
 	if strings.Contains(final, "第 1 手") {

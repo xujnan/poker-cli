@@ -42,9 +42,6 @@ const (
 	// 空行让几块内容分得开，读起来松快，但它是奢侈品：屏幕矮的时候这几行该让给
 	// 真正的内容——一屏只剩八行还拿三行画空白，那是好看压过了好用。
 	roomyHeight = 18
-	// prevHandLines 是上一手留几行。留的是结尾——摊牌和分池在那儿，
-	// 而「谁赢了多少」正是屏幕一清就看不见的那件事。
-	prevHandLines = 4
 	// minLogLines 是再挤也要留几条流水。
 	//
 	// 终端矮到连这几条都放不下时，宁可让它滚一下，也不能把「刚才发生了什么」删干净——
@@ -184,8 +181,10 @@ func (v *liveView) apply(ev poker.Event) {
 	case poker.EventTable:
 		v.timeout = time.Duration(ev.TimeoutMS) * time.Millisecond
 	case poker.EventHandStart:
-		// 把刚打完那一手的结尾留一份，其余清掉——这正是「只展示正在玩的」那句话的落点。
-		v.prev, v.prevHand = tailOf(v.log, prevHandLines), v.hand
+		// 把刚打完那一手整个留一份。留多少不在这儿定——这儿不知道屏幕多高，
+		// 定死一个行数就会在大屏上白白浪费、在小屏上照样溢出。frame 按当时
+		// 还剩多少地方裁，裁掉的是开头：摊牌和分池在结尾，那才是你回头想看的。
+		v.prev, v.prevHand = append([]string(nil), v.log...), v.hand
 		// 底池也在内：hand_start 不带底池，不清的话上一手的数字会一直挂着，
 		// 直到第一个盲注把它盖掉，中间那几帧是在说谎。
 		v.hand, v.street = ev.Hand, "preflop"
@@ -432,20 +431,25 @@ func (v *liveView) frame() string {
 		log = append(append([]string(nil), log...), pending)
 	}
 
-	// 分的顺序是定死的：先给流水留最少的几行，剩下的才轮到上一手，然后流水
-	// 再把没人要的拿回去。人多的桌上座位表本身就高，不这么分的话上一手会把
-	// 整帧顶出屏幕——终端一滚动，「上移 N 行」回到的就不是原来那个位置，
-	// 上一手那一块被推上去再也收不回来，而那恰好是最该让位的东西。
-	keep := minLogLines
-	if len(log) < keep {
-		keep = len(log)
+	// 上一手和这一手的流水分这块地方，规矩是「谁也不许把对方饿死」：
+	// 上一手最多拿一半，这一手用不完的那部分再让给它。
+	//
+	// 两个极端都试过，都不对。上一手管够、流水将就：打到河牌时屏幕上是二十行
+	// 旧账、两行你自己的，而你正盯着这一手怎么走到这儿。流水管够、上一手拿剩的：
+	// 牌一长上一手就整块消失，而那正是刚才还在看的东西。
+	//
+	// 抢不过时仍然是上一手整块让开：人多的桌上座位表本身就占五行，不让的话
+	// 整帧会顶出屏幕——终端一滚动，「上移 N 行」回到的就不是原来那个位置。
+	share := room / 2
+	if spare := room - len(log); spare > share {
+		share = spare
 	}
-	prev := v.prevBlock(room - keep)
+	prev := v.prevBlock(share)
 	budget := room - strings.Count(prev, "\n")
-	if budget < keep {
+	if budget < minLogLines {
 		// 矮到连这几行都放不下时，宁可让它滚一下，也不把「刚才发生了什么」删干净——
 		// 那时屏幕上只剩一个静止的局面，看不出牌是怎么走到这儿的。
-		budget = keep
+		budget = minLogLines
 	}
 	if len(log) > budget {
 		log = log[len(log)-budget:]
@@ -524,13 +528,17 @@ func (v *liveView) roomFor(fixed int) int {
 	return 0
 }
 
-// prevBlock 是屏幕最上面那一小块：上一手的结尾，最多占 room 行。
+// prevBlock 是屏幕最上面那一小块：上一手，最多占 room 行。
 //
 // 一手打完到下一手开始只隔 --hand-delay，屏幕一清，「谁赢了这个底池」就没了。
-// 留结尾而不是留开头：摊牌和分池在结尾，而那才是你回头想看的东西。
+// 整手都存着（见 hand_start），但能画多少要看这一帧还剩多少地方：裁掉的是开头，
+// 因为摊牌和分池在结尾，那才是你回头想看的东西。
 //
-// room 不够就整块不画。这一块是这一屏里优先级最低的东西——它讲的是已经过去
-// 的事，而屏幕是拿来看正在打的这一手的。挤不下时它让位，不是把别人挤出屏幕。
+// 裁了就在标题里说一声。不说的话，一块被砍过的记录和一手本来就短的牌长得一模一样，
+// 人会以为自己看到的是全部——而这一屏说的每一句话都得是真的。
+//
+// room 不够就整块不画。这一块是这一屏里优先级最低的东西：它讲的是已经过去的事，
+// 而屏幕是拿来看正在打的这一手的。挤不下时它让位，不是把别人挤出屏幕。
 func (v *liveView) prevBlock(room int) string {
 	spacer := v.spacer()
 	// 标题一行 + 至少一行内容 + 隔开的空行。凑不齐就别画：一个「上一手（第 7 手）」
@@ -539,25 +547,22 @@ func (v *liveView) prevBlock(room int) string {
 	if len(v.prev) == 0 || room < least {
 		return ""
 	}
-	tail := v.prev
+	tail, cut := v.prev, 0
 	if n := room - 1 - strings.Count(spacer, "\n"); len(tail) > n {
-		tail = tail[len(tail)-n:]
+		cut = len(tail) - n
+		tail = tail[cut:]
+	}
+	title := fmt.Sprintf("上一手（第 %d 手）", v.prevHand)
+	if cut > 0 {
+		title = fmt.Sprintf("上一手（第 %d 手，略去开头 %d 行）", v.prevHand, cut)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n", textui.Dim(fmt.Sprintf("上一手（第 %d 手）", v.prevHand)))
+	fmt.Fprintf(&b, "%s\n", textui.Dim(title))
 	for _, l := range tail {
 		fmt.Fprintf(&b, "  %s\n", l)
 	}
 	b.WriteString(spacer)
 	return b.String()
-}
-
-// tailOf 取一个切片的最后 n 项。
-func tailOf(xs []string, n int) []string {
-	if len(xs) <= n {
-		return append([]string(nil), xs...)
-	}
-	return append([]string(nil), xs[len(xs)-n:]...)
 }
 
 func (v *liveView) headAndSeats() string {
