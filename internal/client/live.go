@@ -410,15 +410,32 @@ func (v *liveView) repaint() {
 // 原来那个位置，屏幕会一路烂下去。以前靠一个拍脑袋的常数压着，现在直接问终端多高，
 // 把除流水之外的部分先排好，剩下几行就显示几条流水。
 func (v *liveView) frame() string {
-	prev := v.prevBlock()
 	head, fixed := v.headAndSeats(), v.tail()
-	budget := v.logBudget(strings.Count(head, "\n") + strings.Count(fixed, "\n") + strings.Count(prev, "\n"))
+	// 标题、座位表、公共牌、提示——这几行是这一屏存在的理由，一行都压不掉。
+	// 剩下多少行，才是上一手和流水能分的。
+	room := v.roomFor(strings.Count(head, "\n") + strings.Count(fixed, "\n"))
 
 	log := v.log
 	// 牌桌在等谁，也排进流水的末尾。座位表上那个标记要先找到他在哪一行才看得见，
 	// 而眼睛在等的时候盯的是流水最后一行——下一条记录会从哪儿冒出来。
 	if pending := v.pendingRow(); pending != "" {
 		log = append(append([]string(nil), log...), pending)
+	}
+
+	// 分的顺序是定死的：先给流水留最少的几行，剩下的才轮到上一手，然后流水
+	// 再把没人要的拿回去。人多的桌上座位表本身就高，不这么分的话上一手会把
+	// 整帧顶出屏幕——终端一滚动，「上移 N 行」回到的就不是原来那个位置，
+	// 上一手那一块被推上去再也收不回来，而那恰好是最该让位的东西。
+	keep := minLogLines
+	if len(log) < keep {
+		keep = len(log)
+	}
+	prev := v.prevBlock(room - keep)
+	budget := room - strings.Count(prev, "\n")
+	if budget < keep {
+		// 矮到连这几行都放不下时，宁可让它滚一下，也不把「刚才发生了什么」删干净——
+		// 那时屏幕上只剩一个静止的局面，看不出牌是怎么走到这儿的。
+		budget = keep
 	}
 	if len(log) > budget {
 		log = log[len(log)-budget:]
@@ -474,8 +491,12 @@ func (v *liveView) pendingRow() string {
 	return textui.Dim(logLine(v.who(v.acting), v.actingLabel(), ""))
 }
 
-// logBudget 算出这一帧还能放几条流水。fixed 是除流水外已经占掉的行数。
-func (v *liveView) logBudget(fixed int) int {
+// roomFor 算出这一帧还剩几行能分给「上一手」和流水。fixed 是压不掉的那部分占了几行。
+//
+// 可以返回 0：九个人的桌子配一个矮终端时，光座位表就把屏幕占满了。那时候
+// 上一手和流水一行都不画——这是能守住的最后一步，再往下就得砍座位表了，
+// 而那是这一屏唯一非讲不可的东西。
+func (v *liveView) roomFor(fixed int) int {
 	h := textui.Height(v.out)
 	if h <= 0 {
 		// 问不出高度说明对面不是终端，重画本来就不该走到这里。
@@ -487,26 +508,37 @@ func (v *liveView) logBudget(fixed int) int {
 	if v.gone {
 		reserve = 2
 	}
-	if n := h - fixed - reserve; n > minLogLines {
+	if n := h - fixed - reserve; n > 0 {
 		return n
 	}
-	return minLogLines
+	return 0
 }
 
-// prevBlock 是屏幕最上面那一小块：上一手的结尾。
+// prevBlock 是屏幕最上面那一小块：上一手的结尾，最多占 room 行。
 //
 // 一手打完到下一手开始只隔 --hand-delay，屏幕一清，「谁赢了这个底池」就没了。
 // 留结尾而不是留开头：摊牌和分池在结尾，而那才是你回头想看的东西。
-func (v *liveView) prevBlock() string {
-	if len(v.prev) == 0 {
+//
+// room 不够就整块不画。这一块是这一屏里优先级最低的东西——它讲的是已经过去
+// 的事，而屏幕是拿来看正在打的这一手的。挤不下时它让位，不是把别人挤出屏幕。
+func (v *liveView) prevBlock(room int) string {
+	spacer := v.spacer()
+	// 标题一行 + 至少一行内容 + 隔开的空行。凑不齐就别画：一个「上一手（第 7 手）」
+	// 的标题底下空空如也，比这块不存在更让人费解。
+	least := 2 + strings.Count(spacer, "\n")
+	if len(v.prev) == 0 || room < least {
 		return ""
+	}
+	tail := v.prev
+	if n := room - 1 - strings.Count(spacer, "\n"); len(tail) > n {
+		tail = tail[len(tail)-n:]
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n", textui.Dim(fmt.Sprintf("上一手（第 %d 手）", v.prevHand)))
-	for _, l := range v.prev {
+	for _, l := range tail {
 		fmt.Fprintf(&b, "  %s\n", l)
 	}
-	b.WriteString(v.spacer())
+	b.WriteString(spacer)
 	return b.String()
 }
 

@@ -676,8 +676,8 @@ func TestPreviousHandStaysOnScreen(t *testing.T) {
 		t.Fatalf("再往前那手不该还占着地方：\n%s", got)
 	}
 	// 留的行数有上限，屏幕不会因为上一手打得长就被挤掉。
-	if n := strings.Count(v.prevBlock(), "\n"); n > prevHandLines+2 {
-		t.Fatalf("上一手那一块有 %d 行，太多了：\n%s", n, v.prevBlock())
+	if n := strings.Count(v.prevBlock(99), "\n"); n > prevHandLines+2 {
+		t.Fatalf("上一手那一块有 %d 行，太多了：\n%s", n, v.prevBlock(99))
 	}
 }
 
@@ -1011,5 +1011,145 @@ func TestActionKeepsHeightAndSparesTheTypedLine(t *testing.T) {
 	}
 	if !strings.Contains(got, "弃牌") {
 		t.Fatalf("该把那一行改成弃牌：%q", got)
+	}
+}
+
+// bigTable 造一手五个人的牌，并且上一手留着结尾——人多的桌子上座位表本身就占五行，
+// 这正是「一帧塞不塞得进一屏」最容易出事的形状。
+func bigTable(v *liveView) {
+	seats := []poker.SeatView{
+		{Player: "Lily", Stack: 131, Position: "UTG"},
+		{Player: "Marco", Stack: 257, Position: "CO"},
+		{Player: "Ken", Stack: 329, Position: "BTN"},
+		{Player: "Dora", Stack: 41, Position: "SB"},
+		{Player: "我", Stack: 242, Position: "BB"},
+	}
+	feed(v,
+		poker.Event{Type: poker.EventHandStart, Hand: 7, Blinds: "1/2", Seats: seats},
+		poker.Event{Type: poker.EventBlind, Player: "Dora", Action: "small_blind", Amount: 1},
+		poker.Event{Type: poker.EventBlind, Player: "我", Action: "big_blind", Amount: 2},
+		poker.Event{Type: poker.EventAction, Player: "Marco", Action: "check", Stack: ptr(257)},
+		poker.Event{Type: poker.EventShowdown, Showdown: []poker.ShowdownEntry{
+			{Player: "Marco", Cards: poker.MustParseCards("8s 5s"), Category: "高牌"},
+			{Player: "Dora", Cards: poker.MustParseCards("4h Ad"), Category: "一对"},
+		}},
+		poker.Event{Type: poker.EventPotAwarded, Pots: []poker.Pot{{Amount: 19, Winners: []string{"Dora"}}}},
+		poker.Event{Type: poker.EventHandEnd},
+		poker.Event{Type: poker.EventHandStart, Hand: 8, Blinds: "1/2", Seats: seats},
+		poker.Event{Type: poker.EventBlind, Player: "Dora", Action: "small_blind", Amount: 1},
+		poker.Event{Type: poker.EventBlind, Player: "我", Action: "big_blind", Amount: 2},
+		poker.Event{Type: poker.EventHoleCards, Player: "我", Cards: poker.MustParseCards("Kh Th")},
+		poker.Event{Type: poker.EventAction, Player: "Lily", Action: "fold", Stack: ptr(131)},
+		poker.Event{Type: poker.EventStreet, Street: "flop", Cards: poker.MustParseCards("2c 7h 9s"),
+			Board: poker.MustParseCards("2c 7h 9s"), Pot: ptr(6)},
+		poker.Event{Type: poker.EventAction, Player: "Marco", Action: "bet", Committed: 6, Stack: ptr(251), Pot: ptr(12)},
+		poker.Event{Type: poker.EventTurn, Player: "Ken"},
+	)
+}
+
+// TestFrameNeverOutgrowsTheTerminal 是这一版的地基。
+//
+// 一帧要是比屏幕高，终端就会滚动；滚动之后「上移 N 行」回到的不再是原来那个
+// 位置，于是最上面那一块被推出屏幕、再也收不回来，往下每一帧都画在错的地方。
+// 屏幕从此一路烂下去，而且自己好不了——这不是不好看，是坏了。
+//
+// 所以这条不是抽查几个高度，是把「人多的桌子 + 留着上一手」这个最挤的形状
+// 放到一排高度上挨个量。以前只有一个 3 行终端的边角测试，量的是「别把流水删光」，
+// 没有人量过上限；五个人的桌子配一个矮窗口就真的顶出去了。
+func TestFrameNeverOutgrowsTheTerminal(t *testing.T) {
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Skipf("开不了 pty: %v", err)
+	}
+	defer ptmx.Close()
+	defer tty.Close()
+	go io.Copy(io.Discard, ptmx)
+
+	for rows := 14; rows <= 40; rows++ {
+		if err := pty.Setsize(tty, &pty.Winsize{Rows: uint16(rows), Cols: 100}); err != nil {
+			t.Fatal(err)
+		}
+		v := newLiveView(tty, "我")
+		bigTable(v)
+
+		frame := v.frame()
+		// 最后一行不带换行，光标停在它上面——所以行数是换行符加一。
+		if got := strings.Count(frame, "\n") + 1; got > rows {
+			t.Fatalf("终端 %d 行，这一帧却有 %d 行：\n%s", rows, got, frame)
+		}
+		// 正在打的这一手一行都不能少：上一手让位，不是反过来。
+		for _, must := range []string{"第 8 手", "Ken", "K♥ T♥", "公共牌", "> "} {
+			if !strings.Contains(frame, must) {
+				t.Fatalf("终端 %d 行时把 %q 挤掉了：\n%s", rows, must, frame)
+			}
+		}
+	}
+}
+
+// TestPreviousHandYieldsFirst：屏幕不够时，先砍上一手，不砍正在打的。
+func TestPreviousHandYieldsFirst(t *testing.T) {
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Skipf("开不了 pty: %v", err)
+	}
+	defer ptmx.Close()
+	defer tty.Close()
+	go io.Copy(io.Discard, ptmx)
+
+	at := func(rows int) string {
+		if err := pty.Setsize(tty, &pty.Winsize{Rows: uint16(rows), Cols: 100}); err != nil {
+			t.Fatal(err)
+		}
+		v := newLiveView(tty, "我")
+		bigTable(v)
+		return v.frame()
+	}
+	if f := at(40); !strings.Contains(f, "上一手（第 7 手）") || !strings.Contains(f, "Marco (CO)         过牌") {
+		t.Fatalf("屏幕够高就该把上一手留全：\n%s", f)
+	}
+	if f := at(9); strings.Contains(f, "上一手") {
+		t.Fatalf("9 行的终端上，上一手该整块让位：\n%s", f)
+	}
+
+	// 中间那一段是逐行让的，不是一刀切。但让掉的必须是开头那几行：prev 存的是
+	// 上一手的结尾，而结尾里那句「底池归了谁」正是留着它的全部理由，砍到只剩
+	// 一个标题就是白占地方。
+	var prevRows []int
+	for rows := 9; rows <= 40; rows++ {
+		f := at(rows)
+		n := 0
+		for _, l := range strings.Split(f, "\n") {
+			if strings.HasPrefix(l, "上一手") {
+				n = 1
+				continue
+			}
+			if n > 0 && strings.TrimSpace(l) != "" && !strings.HasPrefix(l, "第 ") {
+				n++
+				continue
+			}
+			if n > 0 {
+				break
+			}
+		}
+		prevRows = append(prevRows, n)
+		if n == 1 {
+			t.Fatalf("终端 %d 行时上一手只剩个标题：\n%s", rows, f)
+		}
+		if n > 0 && !strings.Contains(f, "底池 19 → Dora") {
+			t.Fatalf("终端 %d 行时把上一手的结果砍掉了：\n%s", rows, f)
+		}
+	}
+	// 屏幕越高留得越多——但只在同一档里比。跨过 roomyHeight 那一行时留白重新
+	// 出现，一下子多占三行，上一手就得让回去几行：那是「够宽敞了就该好看点」
+	// 这条规则的明码标价，不是账算错了。
+	for i := 1; i < len(prevRows); i++ {
+		rows := 9 + i
+		if rows == roomyHeight {
+			continue // 留白在这一行回来，允许它一次性少留几行
+		}
+		if prevRows[i] < prevRows[i-1] {
+			t.Fatalf("终端 %d 行留了 %d 行，%d 行反而只留 %d 行",
+				rows-1, prevRows[i-1], rows, prevRows[i])
+		}
 	}
 }
