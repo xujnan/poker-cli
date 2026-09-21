@@ -1153,3 +1153,30 @@ func TestPreviousHandYieldsFirst(t *testing.T) {
 		}
 	}
 }
+
+// TestErrorSurvivesTheTurnThatFollowsIt：动作非法时那句话必须留在屏幕上。
+//
+// 服务端的非法动作处理是「回一条 error，紧跟着把 turn 和 your_turn 再发一遍」，
+// 好让你重新看到合法动作表。提醒要是被下一条事件无差别地清掉，这条错误就只在
+// 屏幕上活几毫秒——人看到的是「敲了 c，什么也没发生」，而真正的原因被自己
+// 后面那两条事件擦掉了。这是真发生过的一个 bug，不是假想。
+func TestErrorSurvivesTheTurnThatFollowsIt(t *testing.T) {
+	v := newLiveView(&strings.Builder{}, "我")
+	feed(v, handOne()...)
+
+	// 服务端对一个不合法的 call 的完整回应，顺序和条数都照抄 poker.Hand.Apply。
+	feed(v,
+		poker.Event{Type: poker.EventError, Code: "nothing_to_call", Message: "没有注要跟，用 check"},
+		poker.Event{Type: poker.EventTurn, Player: "我"},
+		myTurn(),
+	)
+	if got := v.frame(); !strings.Contains(got, "nothing_to_call") {
+		t.Fatalf("重新轮到你了，但那句「为什么不行」得还在：\n%s", got)
+	}
+
+	// 牌桌真的动了，提醒才过期。
+	feed(v, poker.Event{Type: poker.EventAction, Player: "我", Action: "check", Stack: ptr(198)})
+	if got := v.frame(); strings.Contains(got, "nothing_to_call") {
+		t.Fatalf("已经做出合法动作了，不该还挂着上一句错误：\n%s", got)
+	}
+}

@@ -156,9 +156,19 @@ func (v *liveView) disconnected() {
 
 // apply 把一条事件并进视图。
 func (v *liveView) apply(ev poker.Event) {
-	// 提醒只活到下一条事件为止。轮到你的时候不会有任何事件进来，所以
-	// 「动作非法」那条错误会一直挂着，直到你真的做出一个合法动作。
-	v.note = ""
+	// 提醒活到牌桌真的动一下为止。
+	//
+	// 原先写的是「只活到下一条事件」，配一句「轮到你的时候不会有任何事件进来」
+	// 的假设——那句是错的。动作非法时服务端紧跟着就把 turn 和 your_turn 再发一遍
+	// （把合法动作表重新告诉你），于是那条错误在屏幕上只活了几毫秒：敲一个不合法
+	// 的 c，看到的是「什么也没发生」，而真正的原因（没有注要跟，用 check）
+	// 一闪就被自己后面那两条事件擦掉了。
+	//
+	// turn 和 your_turn 说的是「该你了」，它们不反驳「你刚才那条不合法」，所以不清。
+	// 别的事件都意味着牌桌真的动了，那时候上一句提醒才算过期。
+	if ev.Type != poker.EventTurn && ev.Type != poker.EventYourTurn {
+		v.note = ""
+	}
 
 	if len(ev.Seats) > 0 {
 		v.seats = ev.Seats
